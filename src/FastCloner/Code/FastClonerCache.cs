@@ -153,6 +153,10 @@ internal static class FastClonerCache
     internal static volatile bool HasTypeBehaviorOverrides;
     internal static volatile bool HasActiveTypeBehaviorOverrides;
 
+    // Registered external "ignore" attributes (e.g. JsonIgnore, BsonIgnore, NotMapped).
+    // When present on a member, the member is treated like [FastClonerIgnore].
+    internal static readonly ConcurrentDictionary<Type, byte> ExternalIgnoreAttributes = [];
+
     internal static bool IsTypeIgnored(Type type)
     {
         return HasActiveTypeBehaviorOverrides &&

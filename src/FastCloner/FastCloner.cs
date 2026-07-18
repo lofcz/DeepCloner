@@ -189,6 +189,56 @@ public static class FastCloner
         }
     }
 
+    #region External ignore attributes
+
+    /// <summary>
+    /// Registers an external attribute type as an "ignore" signal. Any member (field, property, or event)
+    /// decorated with this attribute will be skipped during cloning (set to its default value), exactly like
+    /// <see cref="FastClonerIgnoreAttribute"/>.
+    /// </summary>
+    /// <typeparam name="T">An attribute type such as JsonIgnoreAttribute, BsonIgnoreAttribute, NotMappedAttribute, etc.</typeparam>
+    /// <remarks>
+    /// This is matched on attribute <em>presence</em> only. Attributes with conditional constructors
+    /// (e.g. <c>JsonIgnore(Condition = ...)</c>) are not evaluated; the member is always ignored while registered.
+    /// Works in reflection mode. Source-generated cloners cannot observe runtime registration and are unaffected.
+    /// Registering the same attribute type multiple times is idempotent.
+    /// </remarks>
+    public static void RegisterIgnoreAttribute<T>() where T : Attribute
+        => RegisterIgnoreAttribute(typeof(T));
+
+    /// <summary>
+    /// Registers an external attribute type as an "ignore" signal. See <see cref="RegisterIgnoreAttribute{T}"/>.
+    /// </summary>
+    /// <param name="attributeType">The attribute type to recognize as an ignore signal. Must derive from <see cref="Attribute"/>.</param>
+    public static void RegisterIgnoreAttribute(Type attributeType)
+    {
+        if (attributeType is null)
+            throw new ArgumentNullException(nameof(attributeType));
+        if (!typeof(Attribute).IsAssignableFrom(attributeType))
+            throw new ArgumentException($"'{attributeType}' is not an Attribute type.", nameof(attributeType));
+
+        lock (configSync)
+        {
+            FastClonerCache.ExternalIgnoreAttributes[attributeType] = 0;
+            FastClonerCache.ClearCache();
+        }
+    }
+
+    /// <summary>
+    /// Clears all registered external ignore attribute types. Internal helper used by tests to reset global state;
+    /// not part of the public API.
+    /// </summary>
+    internal static void ResetIgnoreAttributes()
+    {
+        lock (configSync)
+        {
+            FastClonerCache.ExternalIgnoreAttributes.Clear();
+            FastClonerCache.ClearCache();
+        }
+    }
+
+    #endregion
+
     private static void PublishEngine(FastClonerPublishedEngine engine)
     {
         maxRecursionDepth = engine.RuntimeConfig.MaxRecursionDepth;

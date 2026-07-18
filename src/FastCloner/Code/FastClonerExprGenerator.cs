@@ -108,6 +108,14 @@ internal static class FastClonerExprGenerator
             if (behaviorAttr is not null)
                 return behaviorAttr.Behavior;
 
+            // 1.5 Check registered external ignore attributes (e.g. JsonIgnore, BsonIgnore, NotMapped).
+            // A member carrying any of these is treated exactly like [FastClonerIgnore].
+            foreach (Type ignoreAttr in FastClonerCache.ExternalIgnoreAttributes.Keys)
+            {
+                if (mi.GetCustomAttribute(ignoreAttr) is not null)
+                    return CloneBehavior.Ignore;
+            }
+
             // 2. Check [NonSerialized] (treat as Ignore)
             NonSerializedAttribute? nonSerialized = mi.GetCustomAttribute<NonSerializedAttribute>();
             if (nonSerialized is not null)

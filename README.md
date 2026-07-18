@@ -121,6 +121,16 @@ FastCloner.FastCloner.ClearAllTypeBehaviors();             // Reset all
 
 > **Note**: Changing runtime behavior invalidates the cache. Try to configure once at startup, or use compile-time attributes when possible.
 
+##### Registering external ignore attributes
+
+If your models already carry framework-level ignore attributes (e.g. `[JsonIgnore]`, `[BsonIgnore]`, `[NotMapped]`), you can register them globally so FastCloner skips those members without adding `[FastClonerIgnore]`:
+
+```csharp
+FastCloner.FastCloner.RegisterIgnoreAttribute<JsonIgnoreAttribute>();
+```
+
+Registered attributes are matched by **presence only** (conditional constructors like `JsonIgnore(Condition = ...)` are not evaluated). Precedence: member-level `[FastClonerIgnore]` > registered external attributes > default. This feature works in **reflection mode only** — source-generated cloners cannot observe runtime registration.
+
 #### Precedence (highest to lowest)
 
 1. Runtime `SetTypeBehavior<T>()` 
