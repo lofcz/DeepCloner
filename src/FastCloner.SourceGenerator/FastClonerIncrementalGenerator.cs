@@ -119,7 +119,8 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
             predicate: SubtypeUsageCollector.IsCandidate,
             transform: static (ctx, _) => ctx)
             .Combine(targetFrameworkProvider)
-            .Select(static (pair, cancellationToken) => SubtypeUsageCollector.Collect(pair.Left, pair.Right, cancellationToken))
+            .Combine(externalIgnoreProvider)
+            .Select(static (pair, cancellationToken) => SubtypeUsageCollector.Collect(pair.Left.Left, pair.Left.Right, pair.Right, cancellationToken))
             .Where(x => x.Count > 0)
             .Collect()
             .Select(static (lists, _) =>

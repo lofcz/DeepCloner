@@ -26,7 +26,7 @@ internal static class SubtypeUsageCollector
         return node is GenericNameSyntax;
     }
 
-    public static EquatableArray<ClosedSubtypeUsage> Collect(GeneratorSyntaxContext context, TargetFramework targetFramework, CancellationToken cancellationToken)
+    public static EquatableArray<ClosedSubtypeUsage> Collect(GeneratorSyntaxContext context, TargetFramework targetFramework, ExternalIgnoreRegistry externalIgnores, CancellationToken cancellationToken)
     {
         GenericNameSyntax node = (GenericNameSyntax)context.Node;
         INamedTypeSymbol? symbol = context.SemanticModel.GetSymbolInfo(node, cancellationToken).Symbol as INamedTypeSymbol;
@@ -48,7 +48,7 @@ internal static class SubtypeUsageCollector
 
         bool nullability = context.SemanticModel.GetNullableContext(node.SpanStart).HasFlag(NullableContext.Enabled);
         TypeModel? model = DerivedTypeCollector.CreateTypeModelForDerived(
-            symbol, context.SemanticModel.Compilation, nullability, targetFramework);
+            symbol, context.SemanticModel.Compilation, nullability, targetFramework, externalIgnores);
         if (model == null)
             return EquatableArray<ClosedSubtypeUsage>.Empty;
 
