@@ -12,6 +12,7 @@ internal static class TypeModelFactory
         bool nullabilityEnabled,
         Compilation compilation,
         TargetFramework targetFramework,
+        ExternalIgnoreRegistry externalIgnores,
         out TypeModel? model,
         out Diagnostic? error)
     {
@@ -23,6 +24,15 @@ internal static class TypeModelFactory
             .Any(a => a.AttributeClass?.ToDisplayString() == "FastCloner.SourceGenerator.Shared.FastClonerSimulateNoRuntimeAttribute");
         bool trustNullability = symbol.GetAttributes()
             .Any(a => a.AttributeClass?.ToDisplayString() == "FastCloner.SourceGenerator.Shared.FastClonerTrustNullabilityAttribute");
+        bool hasPolymorphicAttribute = symbol.GetAttributes()
+            .Any(a => a.AttributeClass?.ToDisplayString() == "FastCloner.SourceGenerator.Shared.FastClonerPolymorphicAttribute");
+        // Abstract roots always dispatch. The attribute extends that to concrete roots (generic
+        // included: closed constructions of subtypes are dispatched); sealed/static roots cannot
+        // use it (misuse is reported by the polymorphic validation pipeline).
+        bool isPolymorphicRoot = hasPolymorphicAttribute &&
+                                 !symbol.IsAbstract &&
+                                 !symbol.IsSealed &&
+                                 !symbol.IsValueType;
         bool? preserveIdentity = GetPreserveIdentityFromType(symbol);
         bool codeAnalysisAvailable = compilation.GetTypeByMetadataName("System.Diagnostics.CodeAnalysis.NotNullIfNotNullAttribute") != null;
         
@@ -31,7 +41,7 @@ internal static class TypeModelFactory
             isFastClonerAvailable = false;
         }
 
-        List<MemberAnalysis> memberAnalyses = MemberCollector.GetMembers(symbol, compilation, nullabilityEnabled);
+        List<MemberAnalysis> memberAnalyses = MemberCollector.GetMembers(symbol, compilation, nullabilityEnabled, externalIgnores);
         Dictionary<string, TypeModel> relatedTypes = new Dictionary<string, TypeModel>(); // Use FQN as key to avoid dupes
         Dictionary<ITypeSymbol, TypeModel?> implicitCache = new Dictionary<ITypeSymbol, TypeModel?>(SymbolEqualityComparer.Default);
         HashSet<ITypeSymbol> processingStack = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
@@ -45,7 +55,7 @@ internal static class TypeModelFactory
             
             if (memberModel.TypeKind is MemberTypeKind.Other or MemberTypeKind.Implicit)
             {
-                if (ImplicitTypeAnalyzer.TryAnalyze(memberType, compilation, nullabilityEnabled, targetFramework, implicitCache, processingStack, out TypeModel? implicitModel))
+                if (ImplicitTypeAnalyzer.TryAnalyze(memberType, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitModel))
                 {
                     memberModel = memberModel with 
                     { 
@@ -95,7 +105,7 @@ internal static class TypeModelFactory
 
                     if (elemType != null && memberModel is { ElementIsSafe: false, ElementHasClonableAttr: false })
                     {
-                        if (ImplicitTypeAnalyzer.TryAnalyze(elemType, compilation, nullabilityEnabled, targetFramework, implicitCache, processingStack, out TypeModel? implicitModel))
+                        if (ImplicitTypeAnalyzer.TryAnalyze(elemType, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitModel))
                         {
                             if (implicitModel != null)
                             {
@@ -120,7 +130,7 @@ internal static class TypeModelFactory
                     {
                         if (memberModel is { KeyIsSafe: false, KeyIsClonable: false })
                         {
-                            if (ImplicitTypeAnalyzer.TryAnalyze(dictTypes.Value.KeyType, compilation, nullabilityEnabled, targetFramework, implicitCache, processingStack, out TypeModel? implicitKey))
+                            if (ImplicitTypeAnalyzer.TryAnalyze(dictTypes.Value.KeyType, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitKey))
                             {
                                 if (implicitKey != null)
                                 {
@@ -140,7 +150,7 @@ internal static class TypeModelFactory
                         
                         if (memberModel is { ValueIsSafe: false, ValueIsClonable: false })
                         {
-                            if (ImplicitTypeAnalyzer.TryAnalyze(dictTypes.Value.ValueType, compilation, nullabilityEnabled, targetFramework, implicitCache, processingStack, out TypeModel? implicitVal))
+                            if (ImplicitTypeAnalyzer.TryAnalyze(dictTypes.Value.ValueType, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitVal))
                             {
                                 if (implicitVal != null)
                                 {
@@ -211,12 +221,12 @@ internal static class TypeModelFactory
         bool isRefLikeType = TypeAnalyzer.IsRefStructType(symbol);
         EquatableArray<TypeModel> derivedTypes = EquatableArray<TypeModel>.Empty;
         
-        if (symbol.IsAbstract)
+        if (symbol.IsAbstract || isPolymorphicRoot)
         {
-            List<TypeModel> derivedTypesList = DerivedTypeCollector.Collect(symbol, compilation, nullabilityEnabled, targetFramework);
+            List<TypeModel> derivedTypesList = DerivedTypeCollector.Collect(symbol, compilation, nullabilityEnabled, targetFramework, externalIgnores);
             derivedTypes = new EquatableArray<TypeModel>(derivedTypesList.ToArray());
-            
-            if (derivedTypesList.Count == 0 && !isFastClonerAvailable)
+
+            if (symbol.IsAbstract && derivedTypesList.Count == 0 && !isFastClonerAvailable)
             {
                 error = Diagnostic.Create(
                     new DiagnosticDescriptor(
@@ -257,6 +267,7 @@ internal static class TypeModelFactory
             isRefLikeType,
             hasParameterlessConstructor,
             codeAnalysisAvailable,
+            isPolymorphicRoot,
             targetFramework,
             new EquatableArray<string>(circRefLog.ToArray()));
 

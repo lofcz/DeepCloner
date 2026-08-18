@@ -11,30 +11,31 @@ internal static class ImplicitTypeAnalyzer
         Compilation compilation,
         bool nullabilityEnabled,
         TargetFramework targetFramework,
+        ExternalIgnoreRegistry externalIgnores,
         Dictionary<ITypeSymbol, TypeModel?> cache,
         HashSet<ITypeSymbol> processingStack,
         out TypeModel? implicitModel)
     {
         implicitModel = null;
-        
+
         if (processingStack.Contains(type))
             return true;
-            
+
         if (cache.TryGetValue(type, out TypeModel? cached))
         {
             implicitModel = cached;
             return cached != null;
         }
-        
+
         if (!TypeAnalyzer.IsImplicitCandidate(type))
             return false;
-            
+
         if (type is not INamedTypeSymbol namedType)
             return false;
-            
+
         processingStack.Add(type);
-        
-        List<MemberAnalysis> memberAnalyses = MemberCollector.GetMembers(namedType, compilation, nullabilityEnabled);
+
+        List<MemberAnalysis> memberAnalyses = MemberCollector.GetMembers(namedType, compilation, nullabilityEnabled, externalIgnores);
         List<MemberModel> finalImplicitMembers = [];
         List<TypeModel> childRelatedTypes = [];
         Dictionary<string, MemberModel> implicitNestedMembers = new Dictionary<string, MemberModel>();
@@ -53,7 +54,7 @@ internal static class ImplicitTypeAnalyzer
             
             if (m.TypeKind is MemberTypeKind.Other or MemberTypeKind.Implicit)
             {
-                if (TryAnalyze(analysis.Type, compilation, nullabilityEnabled, targetFramework, cache, processingStack, out TypeModel? childModel))
+                if (TryAnalyze(analysis.Type, compilation, nullabilityEnabled, targetFramework, externalIgnores, cache, processingStack, out TypeModel? childModel))
                 {
                     m = m with { TypeKind = MemberTypeKind.Implicit, RequiresFastCloner = false };
                     if (childModel != null) childRelatedTypes.Add(childModel);
@@ -71,7 +72,7 @@ internal static class ImplicitTypeAnalyzer
                 bool TryHandleComponent(ITypeSymbol componentType, out MemberModel? componentMember)
                 {
                     componentMember = null;
-                    if (TryAnalyze(componentType, compilation, nullabilityEnabled, targetFramework, cache, processingStack, out TypeModel? compModel))
+                    if (TryAnalyze(componentType, compilation, nullabilityEnabled, targetFramework, externalIgnores, cache, processingStack, out TypeModel? compModel))
                     {
                         if (compModel != null) childRelatedTypes.Add(compModel);
                         

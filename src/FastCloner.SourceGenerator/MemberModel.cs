@@ -110,7 +110,9 @@ internal readonly record struct MemberModel(
     FastClonerMemberVisibility MemberVisibility = FastClonerMemberVisibility.Public, // Visibility mask of the member, used by the type-level [FastClonerVisibility] policy
     NonPublicAccessorStrategy AccessorStrategy = NonPublicAccessorStrategy.None,  // How to access the member when it is not publicly accessible
     string? DeclaringTypeFullName = null,  // FQN of the type that DECLARES this member (may differ from the cloned type for inherited members)
-    bool GetterIsAccessible = true   // Whether the value can be read directly via source.X (false => read via accessor too)
+    bool GetterIsAccessible = true, // Whether the value can be read directly via source.X (false => read via accessor too)
+    bool IsWeaverState = false,     // Weaver-injected runtime state (PostSharp aspects and the like): not data, never deep-cloned
+    bool HasBackingFieldStorage = false // Property is backed by a compiler-generated <Name>k__BackingField
 ) : IEquatable<MemberModel>
 {
     /// <summary>
@@ -162,7 +164,8 @@ internal readonly record struct MemberModel(
         }
 
         string? declaringTypeFqn = property.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-        
+        bool hasBackingFieldStorage = property.SetMethod != null && HasAutoPropertyBackingField(property);
+
         return new MemberModel(
             property.Name,
             property.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
@@ -199,7 +202,9 @@ internal readonly record struct MemberModel(
             visibility,
             accessorStrategy,
             declaringTypeFqn,
-            getterIsAccessible);
+            getterIsAccessible,
+            IsWeaverState: false,
+            hasBackingFieldStorage);
     }
 
     public static MemberModel Create(IFieldSymbol field, bool nullabilityEnabled, Compilation compilation, MemberCloneBehavior memberBehavior = MemberCloneBehavior.Clone)
@@ -224,7 +229,11 @@ internal readonly record struct MemberModel(
             ? NonPublicAccessorStrategy.None
             : NonPublicAccessorStrategy.Field;
         string? declaringTypeFqn = field.ContainingType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-        
+
+        // Weaver-injected state (PostSharp aspect instances and similar) is detected even for
+        // source-declared fields; an explicit member behavior attribute opts the member back in.
+        bool isWeaverState = memberBehavior == MemberCloneBehavior.Clone && DetectWeaverStateField(field);
+
         return new MemberModel(
             field.Name,
             field.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
@@ -261,7 +270,8 @@ internal readonly record struct MemberModel(
             visibility,
             accessorStrategy,
             declaringTypeFqn,
-            fieldIsAccessible);
+            fieldIsAccessible,
+            isWeaverState);
     }
     
     private static bool IsAccessibleFromExternalClass(Accessibility accessibility) =>
@@ -312,6 +322,25 @@ internal readonly record struct MemberModel(
             if (member is IFieldSymbol)
                 return true;
         }
+        return false;
+    }
+
+    /// <summary>
+    /// Mirrors FastCloner.Code.FastClonerWeaverState for source-declared fields: weavers such as
+    /// PostSharp inject state fields named with '~' (impossible in C# identifiers) and aspect
+    /// instances are attribute objects. Such fields are runtime state, not data.
+    /// </summary>
+    private static bool DetectWeaverStateField(IFieldSymbol field)
+    {
+        if (field.Name.Contains("~"))
+            return true;
+
+        for (INamedTypeSymbol? current = field.Type as INamedTypeSymbol; current != null; current = current.BaseType)
+        {
+            if (current is { Name: "Attribute", ContainingNamespace: { Name: "System", ContainingNamespace.IsGlobalNamespace: true } })
+                return true;
+        }
+
         return false;
     }
     

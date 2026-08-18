@@ -121,12 +121,29 @@ FastCloner.FastCloner.ClearAllTypeBehaviors();             // Reset all
 
 > **Note**: Changing runtime behavior invalidates the cache. Try to configure once at startup, or use compile-time attributes when possible.
 
+#### External ignore attributes
+
+Models often already carry framework-level ignore attributes (`[JsonIgnore]`, `[BsonIgnore]`, `[NotMapped]`, ...). Instead of stacking `[FastClonerIgnore]` on every such member, register those attribute types once per assembly:
+
+```csharp
+[assembly: FastClonerExternalIgnore(typeof(JsonIgnoreAttribute), typeof(BsonIgnoreAttribute))]
+```
+
+Members carrying a registered attribute are treated as if they had `[FastClonerIgnore]`. The registration is declared on the assembly whose members it governs, so it is resolved statically:
+
+- **works identically for the reflection cloner and the source generator** - the source generator reads the same attribute at compile time,
+- **zero runtime cost** - decisions are baked into generated/compiled cloners like any `[FastClonerIgnore]`; no cache invalidation, no per-clone checks, AOT-safe,
+- registrations match the exact attribute type or any of its base classes; attribute presence only (constructors and properties like `JsonIgnore(Condition = ...)` are not evaluated).
+
+An explicit member-level `[FastClonerBehavior(...)]` always wins over a registered external attribute.
+
 #### Precedence (highest to lowest)
 
 1. Runtime `SetTypeBehavior<T>()` 
 2. Member-level attribute
-3. Type-level attribute on member's type
-4. Default behavior
+3. Registered external ignore attribute
+4. Type-level attribute on member's type
+5. Default behavior
 
 ### Cache Management
 
@@ -175,6 +192,25 @@ public class Cat : Animal
 // Cloning via the abstract type works - the generator discovered Dog and Cat
 Animal pet = new Dog { Name = "Buddy", Breed = "Labrador" };
 Animal clone = pet.FastDeepClone(); // Returns a cloned Dog
+```
+
+**Non-abstract base classes** - dispatch is not automatic for concrete types. Opt in per hierarchy root with `[FastClonerPolymorphic]`:
+
+```cs
+[FastClonerClonable]
+[FastClonerPolymorphic]
+public class Device
+{
+    public string Name { get; set; }
+}
+
+public class Phone : Device
+{
+    public string OS { get; set; }
+}
+
+Device device = new Phone { Name = "Pixel", OS = "Android" };
+Device clone = device.FastDeepClone();
 ```
 
 ### Explicitly Including Types

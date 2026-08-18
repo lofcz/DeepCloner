@@ -115,17 +115,29 @@ internal static class FastClonerExprGenerator
 
             // 3. For backing fields of auto-implemented properties, check the corresponding property
             // Backing fields are named like "<PropertyName>k__BackingField"
+            PropertyInfo? backingProperty = null;
             if (mi is FieldInfo field && field.Name.StartsWith("<") && field.Name.EndsWith(">k__BackingField"))
             {
                 string propertyName = field.Name.Substring(1, field.Name.Length - ">k__BackingField".Length - 1);
                 // Use DeclaredOnly to avoid AmbiguousMatchException when property is hidden in derived class
-                PropertyInfo? property = field.DeclaringType?.GetProperty(propertyName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
-                if (property != null)
+                backingProperty = field.DeclaringType?.GetProperty(propertyName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+                if (backingProperty != null)
                 {
-                    FastClonerBehaviorAttribute? propBehavior = property.GetCustomAttribute<FastClonerBehaviorAttribute>();
+                    FastClonerBehaviorAttribute? propBehavior = backingProperty.GetCustomAttribute<FastClonerBehaviorAttribute>();
                     if (propBehavior is not null)
                         return propBehavior.Behavior;
                 }
+            }
+
+            // 3.5 Check external ignore attributes registered for the declaring assembly
+            // ([assembly: FastClonerExternalIgnore(typeof(JsonIgnoreAttribute), ...)]). Assembly
+            // attributes are immutable, so this never requires cache invalidation. The lookup is
+            // an empty-array fast path for assemblies without registrations.
+            Type[] externalIgnoreAttributes = FastClonerExternalIgnoreRegistry.GetForAssembly(mi.Module.Assembly);
+            if (FastClonerExternalIgnoreRegistry.Contains(externalIgnoreAttributes, mi) ||
+                (backingProperty is not null && FastClonerExternalIgnoreRegistry.Contains(externalIgnoreAttributes, backingProperty)))
+            {
+                return CloneBehavior.Ignore;
             }
 
             // 4. Check for type-level attribute on the member's type
@@ -710,8 +722,18 @@ internal static class FastClonerExprGenerator
 
         if (!type.IsValueType())
         {
-            MethodInfo methodInfo = StaticMethodInfos.CommonMethods.DirectCloneObject;
-            expressionList.Add(Expression.Assign(toLocal, Expression.Convert(Expression.Call(methodInfo, from), type)));
+            // Prefer a MemberwiseClone declared on the type itself: weavers (PostSharp's
+            // ICloneAwareAspect protocol in particular) replace it with a version that also
+            // re-initializes weaver state on the clone, yielding a correctly instrumented copy.
+            // The lookup is gated on the type having weaver-state fields so plain types pay
+            // nothing beyond cached dictionary lookups.
+            MethodInfo? declaredClone = GetTypeShape(type).HasWeaverStateFields
+                ? FastClonerWeaverState.GetDeclaredMemberwiseCloneMethod(type)
+                : null;
+            Expression copyCall = declaredClone != null
+                ? Expression.Call(Expression.Convert(from, type), declaredClone)
+                : Expression.Call(StaticMethodInfos.CommonMethods.DirectCloneObject, from);
+            expressionList.Add(Expression.Assign(toLocal, Expression.Convert(copyCall, type)));
             expressionList.Add(Expression.Assign(fromLocal, Expression.Convert(from, type)));
             expressionList.Add(Expression.Call(state, StaticMethodInfos.DeepCloneStateMethods.AddKnownRef, from, toLocal));
 
@@ -824,6 +846,7 @@ internal static class FastClonerExprGenerator
         bool containsIgnoredMembers = false;
         bool hasDirectSelfReference = false;
         bool includeMemberMetadata = true;
+        bool hasWeaverStateFields = false;
         Type? currentType = type;
         FastClonerMemberVisibility? cachedVisibility = GetTypeVisibility(type);
         FastClonerMemberVisibility visibilityPolicy = cachedVisibility ?? FastClonerMemberVisibility.All;
@@ -844,6 +867,24 @@ internal static class FastClonerExprGenerator
 
                 if (!includeMemberMetadata)
                 {
+                    continue;
+                }
+
+                if (FastClonerWeaverState.IsWeaverStateField(field))
+                {
+                    hasWeaverStateFields = true;
+
+                    if (HasExplicitMemberBehavior(field))
+                    {
+                        // Explicit member behavior attributes opt back into normal cloning.
+                        continue;
+                    }
+
+                    // Weaver-injected runtime state (PostSharp aspect instances and the like):
+                    // keep whatever the copy primitive left there. Weaver state is not data —
+                    // cloning or resetting it corrupts weaver-generated code (issue #48), while
+                    // the reference copied by MemberwiseClone is exactly what plain MemberwiseClone
+                    // semantics produce.
                     continue;
                 }
 
@@ -935,7 +976,8 @@ internal static class FastClonerExprGenerator
             HasReadonlyFields = hasReadonlyFields,
             ContainsIgnoredMembers = containsIgnoredMembers,
             HasDirectSelfReference = hasDirectSelfReference,
-            MembersExcludedByVisibility = excludedByVisibility?.ToArray()
+            MembersExcludedByVisibility = excludedByVisibility?.ToArray(),
+            HasWeaverStateFields = hasWeaverStateFields
         };
     }
     
@@ -1031,7 +1073,7 @@ internal static class FastClonerExprGenerator
         }
     }
     
-    private static bool HasExplicitMemberBehavior(MemberInfo member)
+    internal static bool HasExplicitMemberBehavior(MemberInfo member)
     {
         return member.GetCustomAttribute<FastClonerBehaviorAttribute>(inherit: false) is not null;
     }
@@ -1150,8 +1192,18 @@ internal static class FastClonerExprGenerator
 
         if (!type.IsValueType())
         {
-            MethodInfo methodInfo = StaticMethodInfos.CommonMethods.DirectCloneObject;
-            expressionList.Add(Expression.Assign(toLocal, Expression.Convert(Expression.Call(methodInfo, from), type)));
+            // Prefer a MemberwiseClone declared on the type itself: weavers (PostSharp's
+            // ICloneAwareAspect protocol in particular) replace it with a version that also
+            // re-initializes weaver state on the clone, yielding a correctly instrumented copy.
+            // The lookup is gated on the type having weaver-state fields so plain types pay
+            // nothing beyond cached dictionary lookups.
+            MethodInfo? declaredClone = GetTypeShape(type).HasWeaverStateFields
+                ? FastClonerWeaverState.GetDeclaredMemberwiseCloneMethod(type)
+                : null;
+            Expression copyCall = declaredClone != null
+                ? Expression.Call(Expression.Convert(from, type), declaredClone)
+                : Expression.Call(StaticMethodInfos.CommonMethods.DirectCloneObject, from);
+            expressionList.Add(Expression.Assign(toLocal, Expression.Convert(copyCall, type)));
             fromLocal = Expression.Variable(type);
             expressionList.Add(Expression.Assign(fromLocal, Expression.Convert(from, type)));
             if (!skipCycleTracking)

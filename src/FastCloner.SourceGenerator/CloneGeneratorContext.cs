@@ -14,6 +14,7 @@ internal sealed class CloneGeneratorContext
     private readonly Dictionary<string, MemberModel> _typeNameToMemberModel = new Dictionary<string, MemberModel>();
     private readonly Dictionary<string, TypeModel> _implicitTypeModels = new Dictionary<string, TypeModel>();
     private readonly Dictionary<string, TypeModel> _derivedTypeHelpers = new Dictionary<string, TypeModel>();
+    private readonly HashSet<string> _usedDerivedHelperMethodNames = new HashSet<string>();
     private readonly Dictionary<string, int> _helperUsageCounts = new Dictionary<string, int>();
 
     public bool NeedsStateClass { get; set; }
@@ -170,13 +171,25 @@ internal sealed class CloneGeneratorContext
             .Replace(':', '_');
     }
     
-    public void RegisterDerivedTypeHelper(TypeModel derivedType, string methodName)
+    /// <summary>
+    /// Registers a private clone helper for a dispatched derived type and returns its method name.
+    /// The name is uniquified when needed: two closed constructions of the same generic subtype
+    /// (e.g. TypedRepo&lt;int&gt; and TypedRepo&lt;string&gt;) share the same simple name.
+    /// </summary>
+    public string RegisterDerivedTypeHelper(TypeModel derivedType, string baseMethodName)
     {
         if (!_derivedTypeHelpers.ContainsKey(derivedType.FullyQualifiedName))
         {
+            string methodName = baseMethodName;
+            int suffix = 2;
+            while (!_usedDerivedHelperMethodNames.Add(methodName))
+                methodName = $"{baseMethodName}_{suffix++}";
+
             _derivedTypeHelpers[derivedType.FullyQualifiedName] = derivedType;
             _typeNameToMethodName[derivedType.FullyQualifiedName] = methodName;
         }
+
+        return _typeNameToMethodName[derivedType.FullyQualifiedName];
     }
     
     public IEnumerable<(TypeModel Model, string MethodName)> GetDerivedTypeHelpers()

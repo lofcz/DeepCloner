@@ -46,6 +46,16 @@ internal static class ClonerToExprGenerator
 
         foreach (FieldInfo fieldInfo in EnumerateFields(type))
         {
+            if (isDeepClone
+                && FastClonerWeaverState.IsWeaverStateField(fieldInfo)
+                && !FastClonerExprGenerator.HasExplicitMemberBehavior(fieldInfo))
+            {
+                // Weaver-injected runtime state (PostSharp aspect instances and the like) is not
+                // data: the destination object keeps its own constructor-initialized state instead
+                // of receiving a deep clone or stale reference of the source's weaver state.
+                continue;
+            }
+
             // Check if member should be shallow cloned (copy reference directly)
             if (FastClonerExprGenerator.MemberIsShallow(fieldInfo))
             {

@@ -43,15 +43,19 @@ internal static class ClassCloneBodyGenerator
         if (useState)
         {
             WriteInstanceCreation(ctx, sb, typeName, hasParameterlessConstructor, isRecord, sourceVarName);
-            
+
             string stateVarForAdd = stateVarName ?? "state";
             string nullConditional = useNullConditional ? "?" : "";
             sb.AppendLine($"            {stateVarForAdd}{nullConditional}.AddKnownRef({sourceVarName}, result);");
             sb.AppendLine();
 
+            // Records are created through their copy constructor (`source with { }`); classes
+            // without a parameterless constructor are created via GetUninitializedObject, so no
+            // constructor ran and weaver state is missing (issue #48).
+            bool instanceCreatedWithoutConstructor = !isRecord && !hasParameterlessConstructor;
             foreach (MemberModel member in ctx.Model.Members)
             {
-                MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVarForAdd);
+                MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVarForAdd, instanceCreatedWithoutConstructor);
             }
             
             sb.AppendLine();
@@ -109,10 +113,12 @@ internal static class ClassCloneBodyGenerator
             else
             {
                 WriteInstanceCreation(ctx, sb, typeName, hasParameterlessConstructor, isRecord, sourceVarName);
-                
+
+                // GetUninitializedObject: no constructor ran (issue #48 — populate without
+                // invoking property setters and share weaver state).
                 foreach (MemberModel member in ctx.Model.Members)
                 {
-                    MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar);
+                    MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar, instanceCreatedWithoutConstructor: true);
                 }
             }
             
