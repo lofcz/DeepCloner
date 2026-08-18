@@ -29,7 +29,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>3.5.5</Version>
+    <Version>3.5.6</Version>
 
     <Title>FastCloner</Title>
     <Description>The fastest deep cloning library, supporting anything from .NET 4.6 to modern .NET 10+ with no dependencies. FastCloner uses a unique source generator capable of analyzing object graphs and cloning object without explicit annotations. For types that cannot be cloned, such as HttpClient, FastCloner uses a highly optimized reflection-based fallback. Zero dependencies, blazingly fast, built for developers who need cloning that just works.</Description>
