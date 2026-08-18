@@ -8,6 +8,12 @@ internal static class MemberCloneGenerator
 {
     public static string GetMemberAssignment(CloneGeneratorContext context, MemberModel member, string sourceVar, string stateVar, string indent = "            ")
     {
+        // Object-initializer assignments always run against constructor-created instances.
+        // Weaver state is not data: the constructor already produced correct fresh state and
+        // copying the source's state over it would corrupt weaver-generated code (issue #48).
+        if (member.IsWeaverState)
+            return string.Empty;
+
         string memberName = member.Name;
         string nf = (!member.IsNullable && !member.IsValueType) ? "!" : "";
         
@@ -80,8 +86,58 @@ internal static class MemberCloneGenerator
         }
     }
 
-    public static void WriteMemberCloning(CloneGeneratorContext context, MemberModel member, string resultVar, string sourceVar, string stateVar)
+    /// <summary>
+    /// Adjusts how a member is populated depending on how the target instance was created
+    /// (see https://github.com/lofcz/FastCloner/issues/48 — PostSharp's INotifyPropertyChanged
+    /// aspect and weavers with the same shape).
+    /// </summary>
+    /// <param name="member">Member to adapt; replaced with an adjusted copy when needed.</param>
+    /// <param name="instanceCreatedWithoutConstructor">
+    /// True when the target instance was created via GetUninitializedObject: no constructor ran,
+    /// so weaver-injected state (PostSharp aspect instances and the like) is missing and property
+    /// setters may dereference it.
+    /// </param>
+    /// <returns>False when the member must not be populated at all.</returns>
+    private static bool AdaptMemberForPopulation(ref MemberModel member, bool instanceCreatedWithoutConstructor)
     {
+        if (member.IsWeaverState)
+        {
+            if (!instanceCreatedWithoutConstructor)
+            {
+                // Constructor-created instance: the constructor already initialized fresh weaver
+                // state; copying anything over it (deep clone or reference) corrupts it.
+                return false;
+            }
+
+            // Uninitialized instance: the state field would otherwise stay null and crash woven
+            // accessors. Sharing the source's state is the best portable approximation — exactly
+            // what Object.MemberwiseClone produces for instrumented types.
+            member = member with { MemberBehavior = MemberCloneBehavior.Reference };
+            return true;
+        }
+
+        if (instanceCreatedWithoutConstructor && member is { IsProperty: true, HasGetter: true }
+            && (member.HasSetter || member.IsInitOnly))
+        {
+            // Never invoke property setters (or init accessors) on an instance that skipped its
+            // constructors: weavers rewrite accessors to dereference ctor-initialized state, which
+            // throws NullReferenceException inside weaver code. Auto-property storage is written
+            // directly instead; properties without resolvable storage are skipped — their backing
+            // fields, when collected as members, still carry the data.
+            if (!member.HasBackingFieldStorage)
+                return false;
+
+            member = member with { AccessorStrategy = NonPublicAccessorStrategy.BackingField };
+        }
+
+        return true;
+    }
+
+    public static void WriteMemberCloning(CloneGeneratorContext context, MemberModel member, string resultVar, string sourceVar, string stateVar, bool instanceCreatedWithoutConstructor = false)
+    {
+        if (!AdaptMemberForPopulation(ref member, instanceCreatedWithoutConstructor))
+            return;
+
         string memberName = member.Name;
         string nf = (!member.IsNullable && !member.IsValueType) ? "!" : "";
         StringBuilder sb = context.Source;

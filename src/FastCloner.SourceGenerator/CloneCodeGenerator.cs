@@ -9,11 +9,13 @@ internal sealed class CloneCodeGenerator
 {
     private readonly CloneGeneratorContext _context;
     private readonly EquatableArray<GenericUsage> _usages;
+    private readonly EquatableArray<ClosedSubtypeUsage> _subtypeUsages;
 
-    public CloneCodeGenerator(TypeModel model, EquatableArray<GenericUsage> usages, BridgeContract bridgeContract)
+    public CloneCodeGenerator(TypeModel model, EquatableArray<GenericUsage> usages, EquatableArray<ClosedSubtypeUsage> subtypeUsages, BridgeContract bridgeContract)
     {
         _context = new CloneGeneratorContext(model, bridgeContract);
         _usages = usages;
+        _subtypeUsages = subtypeUsages;
     }
 
     public string Generate()
@@ -208,7 +210,11 @@ internal sealed class CloneCodeGenerator
              return;
         }
         
-        if (_context.Model.IsAbstract)
+        if (_context.Model.IsPolymorphicRoot)
+        {
+            WritePolymorphicRootPublicBody(typeName, fullTypeName);
+        }
+        else if (_context.Model.IsAbstract)
         {
             sb.AppendLine("            return InternalFastDeepClone(source, null);");
         }
@@ -274,7 +280,11 @@ internal sealed class CloneCodeGenerator
             sb.AppendLine("            if (source == null) return null;");
         }
         
-        if (_context.Model.IsAbstract)
+        if (_context.Model.IsPolymorphicRoot)
+        {
+            WritePolymorphicRootDispatcher(typeName, fullTypeName);
+        }
+        else if (_context.Model.IsAbstract)
         {
             WriteAbstractTypeDispatcher(typeName);
         }
@@ -309,42 +319,45 @@ internal sealed class CloneCodeGenerator
         sb.AppendLine();
     }
 
+    /// <summary>
+    /// Derived types for dispatch: declaration-scanned subtypes from the model plus
+    /// closed constructions of generic subtypes discovered from usages (TypedRepo&lt;int&gt;),
+    /// deduplicated by fully qualified name and appended in a deterministic order.
+    /// </summary>
+    private List<TypeModel> GetEffectiveDerivedTypes()
+    {
+        List<TypeModel> derivedTypes = [.. _context.Model.DerivedTypes];
+
+        if (_subtypeUsages.Count > 0)
+        {
+            HashSet<string> known = [.. derivedTypes.Select(t => t.FullyQualifiedName)];
+
+            foreach (ClosedSubtypeUsage usage in _subtypeUsages
+                         .Where(u => u.RootFqn == _context.Model.FullyQualifiedName)
+                         .OrderBy(u => u.Model.FullyQualifiedName, StringComparer.Ordinal))
+            {
+                if (known.Add(usage.Model.FullyQualifiedName))
+                {
+                    derivedTypes.Add(usage.Model);
+                }
+            }
+        }
+
+        return derivedTypes;
+    }
+
     private void WriteAbstractTypeDispatcher(string typeName)
     {
         StringBuilder sb = _context.Source;
-        EquatableArray<TypeModel> derivedTypes = _context.Model.DerivedTypes;
+        IReadOnlyList<TypeModel> derivedTypes = GetEffectiveDerivedTypes();
 
         sb.AppendLine();
         sb.AppendLine("            // Dispatch to concrete type cloner based on runtime type");
         sb.AppendLine("            var runtimeType = source.GetType();");
         sb.AppendLine();
 
-        foreach (TypeModel? derivedType in derivedTypes)
-        {
-            string derivedTypeName = derivedType.FullyQualifiedName;
-            
-            if (derivedType.Members.Count == 0)
-            {
-                string extensionClassName = $"{derivedType.Namespace}.{derivedType.Name}FastDeepCloneExtensions";
-                if (string.IsNullOrEmpty(derivedType.Namespace))
-                {
-                    extensionClassName = $"{derivedType.Name}FastDeepCloneExtensions";
-                }
-                
-                sb.AppendLine($"            if (runtimeType == typeof({derivedTypeName}))");
-                sb.AppendLine($"                return ({typeName}){extensionClassName}.InternalFastDeepClone(({derivedTypeName})source, state);");
-            }
-            else
-            {
-                string helperName = $"Clone{GetSafeTypeName(derivedType.Name)}";
-                _context.RegisterDerivedTypeHelper(derivedType, helperName);
-                
-                sb.AppendLine($"            if (runtimeType == typeof({derivedTypeName}))");
-                sb.AppendLine($"                return ({typeName}){helperName}(({derivedTypeName})source, state);");
-            }
-            sb.AppendLine();
-        }
-        
+        WriteDerivedTypeDispatchBranches(typeName, derivedTypes);
+
         if (_context.IsFastClonerAvailable)
         {
             sb.AppendLine($"            return ({typeName}){CloneGeneratorContext.FastClonerDeepCloneCall("source")}!;");
@@ -354,6 +367,138 @@ internal sealed class CloneCodeGenerator
             sb.AppendLine($"            throw new InvalidOperationException($\"Cannot clone unknown derived type {{runtimeType.FullName}} of {_context.Model.Name}. \" +");
             sb.AppendLine("                \"Either add the derived type to this assembly, use [FastClonerInclude] to register it, \" +");
             sb.AppendLine("                \"or install the FastCloner NuGet package for runtime fallback.\");");
+        }
+    }
+
+    /// <summary>
+    /// Emits the public FastDeepClone body for a non-abstract polymorphic root.
+    /// The exact root type is checked first and its body is inlined, so cloning the root
+    /// itself costs a single type check over the plain clonable path; only actual
+    /// subtypes pay for dispatch by falling through to the internal dispatcher.
+    /// </summary>
+    private void WritePolymorphicRootPublicBody(string typeName, string fullTypeName)
+    {
+        StringBuilder sb = _context.Source;
+
+        if (!_context.Model.TrustNullability)
+        {
+            sb.AppendLine("            if (source == null) return null;");
+        }
+
+        sb.AppendLine($"            if (source.GetType() != typeof({fullTypeName}))");
+        sb.AppendLine("            {");
+        sb.AppendLine("                return InternalFastDeepClone(source, null)!;");
+        sb.AppendLine("            }");
+        sb.AppendLine();
+
+        if (_context.NeedsStateTracking)
+        {
+            _context.NeedsStateClass = true;
+            sb.AppendLine("            var localState = new FcGeneratedCloneState();");
+            sb.AppendLine("            var known = localState.GetKnownRef(source);");
+            sb.AppendLine($"            if (known != null) return ({typeName})known;");
+            sb.AppendLine();
+            WriteCloneBody(typeName, fullTypeName, true, "localState");
+        }
+        else
+        {
+            WriteCloneBody(typeName, fullTypeName, false);
+        }
+    }
+
+    /// <summary>
+    /// Emits the InternalFastDeepClone body for a non-abstract polymorphic root:
+    /// subtype dispatch branches, then an unknown-subtype guard, then the state-aware
+    /// root body. The guard structure keeps the root body at standard indentation.
+    /// </summary>
+    private void WritePolymorphicRootDispatcher(string typeName, string fullTypeName)
+    {
+        StringBuilder sb = _context.Source;
+        IReadOnlyList<TypeModel> derivedTypes = GetEffectiveDerivedTypes();
+
+        sb.AppendLine();
+        sb.AppendLine("            // Dispatch to the cloner matching the runtime type (polymorphic root)");
+        sb.AppendLine("            var runtimeType = source.GetType();");
+        sb.AppendLine();
+
+        WriteDerivedTypeDispatchBranches(typeName, derivedTypes);
+
+        // Neither a known subtype nor the exact root type: unknown subtype fallback,
+        // identical to the abstract dispatcher tail.
+        sb.AppendLine($"            if (runtimeType != typeof({fullTypeName}))");
+        sb.AppendLine("            {");
+        if (_context.IsFastClonerAvailable)
+        {
+            sb.AppendLine($"                return ({typeName}){CloneGeneratorContext.FastClonerDeepCloneCall("source")}!;");
+        }
+        else
+        {
+            sb.AppendLine($"                throw new InvalidOperationException($\"Cannot clone unknown derived type {{runtimeType.FullName}} of {_context.Model.Name}. \" +");
+            sb.AppendLine("                    \"Either add the derived type to this assembly, use [FastClonerInclude] to register it, \" +");
+            sb.AppendLine("                    \"or install the FastCloner NuGet package for runtime fallback.\");");
+        }
+        sb.AppendLine("            }");
+        sb.AppendLine();
+
+        // Exact root type: the same body a plain clonable generates.
+        if (_context.NeedsStateTracking)
+        {
+            _context.NeedsStateClass = true;
+            sb.AppendLine("            var localState = state ?? new FcGeneratedCloneState();");
+            sb.AppendLine("            var known = localState.GetKnownRef(source);");
+            sb.AppendLine($"            if (known != null) return ({typeName})known;");
+            sb.AppendLine();
+            WriteCloneBody(typeName, fullTypeName, true, "localState");
+        }
+        else
+        {
+            _context.NeedsStateClass = true;
+            sb.AppendLine("            if (state != null)");
+            sb.AppendLine("            {");
+            sb.AppendLine("                var known = state.GetKnownRef(source);");
+            sb.AppendLine($"                if (known != null) return ({typeName})known;");
+            sb.AppendLine("            }");
+            WriteCloneBody(typeName, fullTypeName, true, "state");
+        }
+    }
+
+    private void WriteDerivedTypeDispatchBranches(string typeName, IReadOnlyList<TypeModel> derivedTypes)
+    {
+        StringBuilder sb = _context.Source;
+
+        // Inside a generic extension method (Repo<T>) no direct cast to a concrete subtype
+        // exists, so casts to and from subtypes must roundtrip through object.
+        bool isGenericRoot = _context.Model.TypeParameters.Count > 0;
+
+        foreach (TypeModel? derivedType in derivedTypes)
+        {
+            string derivedTypeName = derivedType.FullyQualifiedName;
+            string sourceCast = isGenericRoot ? $"({derivedTypeName})(object)source" : $"({derivedTypeName})source";
+            string resultCast = isGenericRoot ? $"({typeName})(object)" : $"({typeName})";
+
+            if (derivedType.Members.Count == 0)
+            {
+                // global:: prefix is required: without it a consumer namespace like Foo.Bar,
+                // where a type named Foo exists in namespace Foo, hijacks the first segment
+                // and the generated reference fails to compile (CS0117).
+                string extensionClassName = string.IsNullOrEmpty(derivedType.Namespace)
+                    ? $"global::{derivedType.Name}FastDeepCloneExtensions"
+                    : $"global::{derivedType.Namespace}.{derivedType.Name}FastDeepCloneExtensions";
+
+                sb.AppendLine($"            if (runtimeType == typeof({derivedTypeName}))");
+                sb.AppendLine($"                return {resultCast}{extensionClassName}.InternalFastDeepClone({sourceCast}, state)!;");
+            }
+            else
+            {
+                string helperName = _context.RegisterDerivedTypeHelper(derivedType, $"Clone{GetSafeTypeName(derivedType.Name)}");
+                // Helper methods on generic roots carry the root's type parameters so that
+                // collection helpers invoked inside them (Helper<T>(...)) resolve.
+                string helperTypeParams = GetTypeParametersString();
+
+                sb.AppendLine($"            if (runtimeType == typeof({derivedTypeName}))");
+                sb.AppendLine($"                return {resultCast}{helperName}{helperTypeParams}({sourceCast}, state);");
+            }
+            sb.AppendLine();
         }
     }
 
@@ -379,11 +524,15 @@ internal sealed class CloneCodeGenerator
 
         foreach ((TypeModel derivedModel, string methodName) in _context.GetDerivedTypeHelpers())
         {
+            // Generic roots: the helper shares the root's type parameters (unused in its
+            // signature) so member cloning inside it can call generic collection helpers.
+            string helperTypeParams = GetTypeParametersString();
+
             sb.AppendLine();
             sb.AppendLine($"        /// <summary>");
             sb.AppendLine($"        /// Clones a {derivedModel.Name} instance (auto-generated for abstract base class).");
             sb.AppendLine($"        /// </summary>");
-            sb.AppendLine($"        private static {derivedModel.FullyQualifiedName} {methodName}({derivedModel.FullyQualifiedName} source, FcGeneratedCloneState? state)");
+            sb.AppendLine($"        private static {derivedModel.FullyQualifiedName} {methodName}{helperTypeParams}({derivedModel.FullyQualifiedName} source, FcGeneratedCloneState? state)");
             sb.AppendLine("        {");
             
             if (derivedModel.NeedsStateTracking)
@@ -488,17 +637,19 @@ internal sealed class CloneCodeGenerator
             else
             {
                 ClassCloneBodyGenerator.WriteGetUninitializedObject(sb, typeName);
-                
+
                 if (useState)
                 {
                     sb.AppendLine($"            {stateVarName}?.AddKnownRef(source, result);");
                 }
-                
+
                 sb.AppendLine();
 
+                // GetUninitializedObject: no constructor ran (issue #48 — populate without
+                // invoking property setters and share weaver state).
                 foreach (MemberModel member in derivedModel.Members)
                 {
-                    MemberCloneGenerator.WriteMemberCloning(_context, member, "result", "source", stateVarName);
+                    MemberCloneGenerator.WriteMemberCloning(_context, member, "result", "source", stateVarName, instanceCreatedWithoutConstructor: true);
                 }
 
                 sb.AppendLine();

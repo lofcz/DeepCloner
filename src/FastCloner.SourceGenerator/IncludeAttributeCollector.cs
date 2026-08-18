@@ -7,7 +7,7 @@ namespace FastCloner.SourceGenerator;
 
 internal static class IncludeAttributeCollector
 {
-    public static EquatableArray<GenericUsage> Collect(GeneratorAttributeSyntaxContext context, TargetFramework targetFramework, CancellationToken cancellationToken)
+    public static EquatableArray<GenericUsage> Collect(GeneratorAttributeSyntaxContext context, TargetFramework targetFramework, ExternalIgnoreRegistry externalIgnores, CancellationToken cancellationToken)
     {
         INamedTypeSymbol? symbol = context.TargetSymbol as INamedTypeSymbol;
         if (symbol == null || !symbol.IsGenericType)
@@ -37,7 +37,16 @@ internal static class IncludeAttributeCollector
                         {
                             if (typeConstant.Value is ITypeSymbol typeArg)
                             {
-                                GenericUsage? usage = GenericTypeAnalyzer.Analyze(symbol, typeArg, compilation, nullability, targetFramework);
+                                // Included SUBTYPES (StringRepo : Repo<string>, TypedRepo<int> : Repo<List<int>>)
+                                // are dispatch targets handled by DerivedTypeCollector, not T-argument
+                                // registrations; feeding them here would emit meaningless Cloner<T> branches.
+                                if (typeArg is INamedTypeSymbol namedTypeArg &&
+                                    DerivedTypeCollector.IsDerivedFrom(namedTypeArg, symbol))
+                                {
+                                    continue;
+                                }
+
+                                GenericUsage? usage = GenericTypeAnalyzer.Analyze(symbol, typeArg, compilation, nullability, targetFramework, externalIgnores);
                                 if (usage.HasValue)
                                 {
                                     usages.Add(usage.Value);
@@ -45,7 +54,7 @@ internal static class IncludeAttributeCollector
                             }
                         }
                     }
-                }   
+                }
             }
         }
 

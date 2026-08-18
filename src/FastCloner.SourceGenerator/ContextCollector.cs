@@ -7,7 +7,7 @@ namespace FastCloner.SourceGenerator;
 
 internal static class ContextCollector
 {
-    public static Result<ContextModel> Collect(GeneratorAttributeSyntaxContext context, TargetFramework targetFramework, System.Threading.CancellationToken cancellationToken)
+    public static Result<ContextModel> Collect(GeneratorAttributeSyntaxContext context, TargetFramework targetFramework, ExternalIgnoreRegistry externalIgnores, System.Threading.CancellationToken cancellationToken)
     {
         INamedTypeSymbol? symbol = context.TargetSymbol as INamedTypeSymbol;
         if (symbol == null)
@@ -73,7 +73,7 @@ internal static class ContextCollector
 
                     foreach (ITypeSymbol? typeToRegister in typesToProcess)
                     {
-                        if (ImplicitTypeAnalyzer.TryAnalyze(typeToRegister, compilation, nullabilityEnabled, targetFramework, implicitCache, processingStack, out TypeModel? model))
+                        if (ImplicitTypeAnalyzer.TryAnalyze(typeToRegister, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? model))
                         {
                             if (model != null)
                             {

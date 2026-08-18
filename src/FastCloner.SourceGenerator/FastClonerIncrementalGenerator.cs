@@ -23,9 +23,15 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
             .Select(static (provider, _) => TargetFrameworkDetector.Detect(provider));
         IncrementalValueProvider<BridgeContract> bridgeContractProvider = context.CompilationProvider
             .Select(static (compilation, _) => BridgeContractCollector.Collect(compilation));
+        // Compilation-global registry of external ignore attributes ([assembly: FastClonerExternalIgnore]).
+        // Combined into the transform pipelines (NOT just the emit step) because member clone
+        // behavior is decided there; registry changes must invalidate the per-type models, while
+        // an unchanged registry compares equal and leaves the incremental caches intact.
+        IncrementalValueProvider<ExternalIgnoreRegistry> externalIgnoreProvider = context.CompilationProvider
+            .Select(static (compilation, _) => ExternalIgnoreCollector.Collect(compilation));
         IncrementalValueProvider<(TargetFramework Tfm, BridgeContract Contract)> bridgeProxyConditions =
             targetFrameworkProvider.Combine(bridgeContractProvider);
-        
+
         context.RegisterSourceOutput(bridgeProxyConditions, static (ctx, args) =>
         {
             (TargetFramework tfm, BridgeContract contract) = args;
@@ -34,34 +40,35 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
                 ctx.AddSource(BridgeProxyEmitter.HintName, SourceText.From(BridgeProxyEmitter.Emit(contract), Encoding.UTF8));
             }
         });
-        
-        IncrementalValuesProvider<(GeneratorAttributeSyntaxContext Ctx, TargetFramework Tfm)> attributeProvider = 
+
+        IncrementalValuesProvider<(GeneratorAttributeSyntaxContext Ctx, TargetFramework Tfm, ExternalIgnoreRegistry ExternalIgnores)> attributeProvider =
             context.SyntaxProvider.ForAttributeWithMetadataName(
                 fullyQualifiedMetadataName: "FastCloner.SourceGenerator.Shared.FastClonerClonableAttribute",
-                predicate: static (node, cancellationToken) => 
+                predicate: static (node, cancellationToken) =>
                     node is ClassDeclarationSyntax or StructDeclarationSyntax or RecordDeclarationSyntax,
                 transform: static (ctx, cancellationToken) => ctx)
             .Combine(targetFrameworkProvider)
-            .Select(static (pair, _) => (pair.Left, pair.Right));
-        
+            .Combine(externalIgnoreProvider)
+            .Select(static (pair, _) => (pair.Left.Left, pair.Left.Right, pair.Right));
+
         IncrementalValuesProvider<Result<TypeModel>> pipeline = attributeProvider
             .Select(static (pair, cancellationToken) =>
             {
-                (GeneratorAttributeSyntaxContext ctx, TargetFramework tfm) = pair;
-                
+                (GeneratorAttributeSyntaxContext ctx, TargetFramework tfm, ExternalIgnoreRegistry externalIgnores) = pair;
+
                 ISymbol? symbol = ctx.SemanticModel.GetDeclaredSymbol(ctx.TargetNode);
                 if (symbol is INamedTypeSymbol namedTypeSymbol)
                 {
                     bool nullabilityEnabled = ctx.SemanticModel.GetNullableContext(ctx.TargetNode.SpanStart)
                         .HasFlag(NullableContext.Enabled);
-                    
+
                     Compilation compilation = ctx.SemanticModel.Compilation;
-                    
-                    return TypeModelFactory.TryCreate(namedTypeSymbol, nullabilityEnabled, compilation, tfm, out TypeModel? model, out Diagnostic? error) ? 
-                        Result<TypeModel>.Success(model!) : 
+
+                    return TypeModelFactory.TryCreate(namedTypeSymbol, nullabilityEnabled, compilation, tfm, externalIgnores, out TypeModel? model, out Diagnostic? error) ?
+                        Result<TypeModel>.Success(model!) :
                         Result<TypeModel>.Error(error!);
                 }
-                
+
                 return Result<TypeModel>.Error(
                     Diagnostic.Create(
                         new DiagnosticDescriptor(
@@ -79,7 +86,8 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
             predicate: GenericUsageCollector.IsCandidate,
             transform: static (ctx, _) => ctx)
             .Combine(targetFrameworkProvider)
-            .Select(static (pair, cancellationToken) => GenericUsageCollector.Collect(pair.Left, pair.Right, cancellationToken))
+            .Combine(externalIgnoreProvider)
+            .Select(static (pair, cancellationToken) => GenericUsageCollector.Collect(pair.Left.Left, pair.Left.Right, pair.Right, cancellationToken))
             .Where(x => x.Count > 0);
 
         IncrementalValuesProvider<EquatableArray<GenericUsage>> includedUsages = context.SyntaxProvider.ForAttributeWithMetadataName(
@@ -87,7 +95,8 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
             predicate: static (node, _) => node is ClassDeclarationSyntax || node is StructDeclarationSyntax,
             transform: static (ctx, _) => ctx)
             .Combine(targetFrameworkProvider)
-            .Select(static (pair, cancellationToken) => IncludeAttributeCollector.Collect(pair.Left, pair.Right, cancellationToken))
+            .Combine(externalIgnoreProvider)
+            .Select(static (pair, cancellationToken) => IncludeAttributeCollector.Collect(pair.Left.Left, pair.Left.Right, pair.Right, cancellationToken))
             .Where(x => x.Count > 0);
 
         IncrementalValueProvider<EquatableArray<GenericUsage>> usagePipeline = explicitUsages.Collect().Combine(includedUsages.Collect())
@@ -95,17 +104,36 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
             {
                 (ImmutableArray<EquatableArray<GenericUsage>> explicitList, ImmutableArray<EquatableArray<GenericUsage>> includedList) = pair;
                 List<GenericUsage> list = [];
-                
-                foreach (EquatableArray<GenericUsage> array in explicitList) 
+
+                foreach (EquatableArray<GenericUsage> array in explicitList)
                     list.AddRange(array);
-                foreach (EquatableArray<GenericUsage> array in includedList) 
+                foreach (EquatableArray<GenericUsage> array in includedList)
                     list.AddRange(array);
 
                 return new EquatableArray<GenericUsage>(list.Distinct().ToArray());
             });
-        
-        IncrementalValuesProvider<((Result<TypeModel> Left, EquatableArray<GenericUsage> Right) Data, BridgeContract Contract)> combinedPipeline =
-            pipeline.Combine(usagePipeline).Combine(bridgeContractProvider);
+
+        // Closed constructions of generic subtypes (TypedRepo<int>) discovered from usages,
+        // dispatched by their polymorphic/abstract root like non-generic subtypes.
+        IncrementalValueProvider<EquatableArray<ClosedSubtypeUsage>> subtypeUsagePipeline = context.SyntaxProvider.CreateSyntaxProvider(
+            predicate: SubtypeUsageCollector.IsCandidate,
+            transform: static (ctx, _) => ctx)
+            .Combine(targetFrameworkProvider)
+            .Combine(externalIgnoreProvider)
+            .Select(static (pair, cancellationToken) => SubtypeUsageCollector.Collect(pair.Left.Left, pair.Left.Right, pair.Right, cancellationToken))
+            .Where(x => x.Count > 0)
+            .Collect()
+            .Select(static (lists, _) =>
+            {
+                List<ClosedSubtypeUsage> merged = [];
+                foreach (EquatableArray<ClosedSubtypeUsage> list in lists)
+                    merged.AddRange(list);
+
+                return new EquatableArray<ClosedSubtypeUsage>(merged.Distinct().ToArray());
+            });
+
+        IncrementalValuesProvider<(((Result<TypeModel> Left, EquatableArray<GenericUsage> Right) Data, EquatableArray<ClosedSubtypeUsage> Subtypes), BridgeContract Contract)> combinedPipeline =
+            pipeline.Combine(usagePipeline).Combine(subtypeUsagePipeline).Combine(bridgeContractProvider);
 
         // OPTIMAL PERFORMANCE: No Compilation combine!
         // All type analysis is pre-computed in TypeModel during the transform step.
@@ -113,7 +141,7 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
         // not on every keypress.
         context.RegisterSourceOutput(combinedPipeline, static (ctx, source) =>
         {
-            ((Result<TypeModel>? result, EquatableArray<GenericUsage> usages), BridgeContract contract) = source;
+            var (((result, usages), subtypeUsages), contract) = source;
             
             result.Handle(
                 model =>
@@ -157,7 +185,7 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
                             }
                         }
 
-                        CloneCodeGenerator generator = new CloneCodeGenerator(model, usages, contract);
+                        CloneCodeGenerator generator = new CloneCodeGenerator(model, usages, subtypeUsages, contract);
                         string generatedSource = generator.Generate();
 
                         if (generator.SkippedNonPublicMembers.Count > 0)
@@ -213,16 +241,17 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
         });
 
         // FastClonerContext Pipeline
-        IncrementalValuesProvider<(GeneratorAttributeSyntaxContext Ctx, TargetFramework Tfm)> contextAttributeProvider = 
+        IncrementalValuesProvider<(GeneratorAttributeSyntaxContext Ctx, TargetFramework Tfm, ExternalIgnoreRegistry ExternalIgnores)> contextAttributeProvider =
             context.SyntaxProvider.ForAttributeWithMetadataName(
                 fullyQualifiedMetadataName: "FastCloner.SourceGenerator.Shared.FastClonerRegisterAttribute",
                 predicate: static (node, _) => node is ClassDeclarationSyntax,
                 transform: static (ctx, _) => ctx)
             .Combine(targetFrameworkProvider)
-            .Select(static (pair, _) => (pair.Left, pair.Right));
-        
+            .Combine(externalIgnoreProvider)
+            .Select(static (pair, _) => (pair.Left.Left, pair.Left.Right, pair.Right));
+
         IncrementalValuesProvider<Result<ContextModel>> contextPipeline = contextAttributeProvider
-            .Select(static (pair, cancellationToken) => ContextCollector.Collect(pair.Ctx, pair.Tfm, cancellationToken));
+            .Select(static (pair, cancellationToken) => ContextCollector.Collect(pair.Ctx, pair.Tfm, pair.ExternalIgnores, cancellationToken));
 
         // Deduplicate pipeline results
         IncrementalValuesProvider<Result<ContextModel>> dedupedContextPipeline = contextPipeline.Collect().SelectMany((results, _) => 
@@ -247,7 +276,7 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
                     {
                         ContextCodeGenerator generator = new ContextCodeGenerator(model);
                         string source = generator.Generate();
-                        
+
                         string safeName = model.FullyQualifiedName
                             .Replace("global::", "")
                             .Replace(".", "_")
@@ -277,5 +306,16 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
                 },
                 error => ctx.ReportDiagnostic(error));
         });
+
+        // Polymorphic attribute validation: reports misuse of [FastClonerPolymorphic] (FCG011-FCG012).
+        // Separate from the clonable pipeline so misuse is caught even when [FastClonerClonable] is missing.
+        IncrementalValuesProvider<PolymorphicValidationInfo> polymorphicValidation =
+            context.SyntaxProvider.ForAttributeWithMetadataName(
+                fullyQualifiedMetadataName: "FastCloner.SourceGenerator.Shared.FastClonerPolymorphicAttribute",
+                predicate: static (node, _) => node is ClassDeclarationSyntax or RecordDeclarationSyntax,
+                transform: static (ctx, _) =>
+                    PolymorphicValidationInfo.FromSymbol(ctx.SemanticModel.GetDeclaredSymbol(ctx.TargetNode) as INamedTypeSymbol));
+
+        context.RegisterSourceOutput(polymorphicValidation, static (ctx, info) => info.Report(ctx));
     }
 }

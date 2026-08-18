@@ -11,9 +11,16 @@ internal static class GenericTypeAnalyzer
         ITypeSymbol typeArg,
         Compilation compilation,
         bool nullability,
-        TargetFramework targetFramework)
+        TargetFramework targetFramework,
+        ExternalIgnoreRegistry externalIgnores)
     {
         if (typeArg.TypeKind == TypeKind.TypeParameter)
+            return null;
+
+        // Unbound arguments (e.g. List<U> from a foreign generic declaration's base list
+        // like TypedRepo<U> : Repo<List<U>>) cannot appear in generated code; cloning for
+        // such cases falls back to the runtime cloner.
+        if (ContainsUnboundTypeParameter(typeArg))
             return null;
 
         bool isSafe = TypeAnalyzer.IsSafeType(typeArg, compilation);
@@ -42,7 +49,7 @@ internal static class GenericTypeAnalyzer
                 return;
 
             // Check if this type is a candidate for implicit cloning
-            if (ImplicitTypeAnalyzer.TryAnalyze(t, compilation, nullability, targetFramework, implicitCache, processingStack, out TypeModel? implicitModel))
+            if (ImplicitTypeAnalyzer.TryAnalyze(t, compilation, nullability, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitModel))
             {
                 if (implicitModel != null && !implicitTypes.ContainsKey(implicitModel.FullyQualifiedName))
                 {
@@ -95,5 +102,25 @@ internal static class GenericTypeAnalyzer
         }
 
         return null;
+    }
+
+    internal static bool ContainsUnboundTypeParameter(ITypeSymbol type)
+    {
+        switch (type)
+        {
+            case ITypeParameterSymbol:
+                return true;
+            case IArrayTypeSymbol array:
+                return ContainsUnboundTypeParameter(array.ElementType);
+            case INamedTypeSymbol named:
+                foreach (ITypeSymbol? typeArgument in named.TypeArguments)
+                {
+                    if (ContainsUnboundTypeParameter(typeArgument))
+                        return true;
+                }
+                return false;
+            default:
+                return false;
+        }
     }
 }

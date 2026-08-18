@@ -10,19 +10,20 @@ internal static class DerivedTypeCollector
         INamedTypeSymbol abstractType,
         Compilation compilation,
         bool nullabilityEnabled,
-        TargetFramework targetFramework)
+        TargetFramework targetFramework,
+        ExternalIgnoreRegistry externalIgnores)
     {
         List<TypeModel> derivedTypes = [];
         HashSet<ITypeSymbol> processedTypes = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
 
-        CollectIncludedTypes(abstractType, compilation, nullabilityEnabled, targetFramework, derivedTypes, processedTypes);
-        
+        CollectIncludedTypes(abstractType, compilation, nullabilityEnabled, targetFramework, externalIgnores, derivedTypes, processedTypes);
+
         bool hasDisableAutoDiscovery = abstractType.GetAttributes()
             .Any(a => a.AttributeClass?.ToDisplayString() == "FastCloner.SourceGenerator.Shared.FastClonerDisableAutoDiscoveryAttribute");
-        
+
         if (!hasDisableAutoDiscovery)
         {
-            CollectDerivedTypesFromCompilation(abstractType, compilation, nullabilityEnabled, targetFramework, derivedTypes, processedTypes);
+            CollectDerivedTypesFromCompilation(abstractType, compilation, nullabilityEnabled, targetFramework, externalIgnores, derivedTypes, processedTypes);
         }
 
         return derivedTypes;
@@ -33,6 +34,7 @@ internal static class DerivedTypeCollector
         Compilation compilation,
         bool nullabilityEnabled,
         TargetFramework targetFramework,
+        ExternalIgnoreRegistry externalIgnores,
         List<TypeModel> derivedTypes,
         HashSet<ITypeSymbol> processedTypes)
     {
@@ -52,7 +54,7 @@ internal static class DerivedTypeCollector
             {
                 if (typeConstant.Value is not INamedTypeSymbol includedType)
                     continue;
-                
+
                 if (!IsDerivedFrom(includedType, abstractType))
                     continue;
 
@@ -62,7 +64,12 @@ internal static class DerivedTypeCollector
                 if (includedType.IsAbstract)
                     continue;
 
-                TypeModel? model = CreateTypeModelForDerived(includedType, compilation, nullabilityEnabled, targetFramework);
+                // Open generic declarations (typeof(TypedRepo<>)) cannot be referenced in
+                // generated dispatch; only closed constructions (typeof(TypedRepo<int>)) can.
+                if (includedType is { IsGenericType: true, IsDefinition: true })
+                    continue;
+
+                TypeModel? model = CreateTypeModelForDerived(includedType, compilation, nullabilityEnabled, targetFramework, externalIgnores);
                 if (model != null)
                 {
                     derivedTypes.Add(model);
@@ -76,34 +83,43 @@ internal static class DerivedTypeCollector
         Compilation compilation,
         bool nullabilityEnabled,
         TargetFramework targetFramework,
+        ExternalIgnoreRegistry externalIgnores,
         List<TypeModel> derivedTypes,
         HashSet<ITypeSymbol> processedTypes)
     {
-        DerivedTypeVisitor visitor = new DerivedTypeVisitor(abstractType, compilation, nullabilityEnabled, targetFramework, derivedTypes, processedTypes);
+        DerivedTypeVisitor visitor = new DerivedTypeVisitor(abstractType, compilation, nullabilityEnabled, targetFramework, externalIgnores, derivedTypes, processedTypes);
         visitor.Visit(compilation.GlobalNamespace);
     }
 
-    private static bool IsDerivedFrom(INamedTypeSymbol type, INamedTypeSymbol potentialBase)
+    internal static bool IsDerivedFrom(INamedTypeSymbol type, INamedTypeSymbol potentialBase)
     {
         INamedTypeSymbol? current = type.BaseType;
         while (current != null)
         {
             if (SymbolEqualityComparer.Default.Equals(current, potentialBase))
                 return true;
+
+            // A closed construction (Repo<string>) derives from the open declaration (Repo<T>):
+            // generic roots dispatch to non-generic subtypes like StringRepo : Repo<string>.
+            if (current is { IsGenericType: true } &&
+                SymbolEqualityComparer.Default.Equals(current.OriginalDefinition, potentialBase))
+                return true;
+
             current = current.BaseType;
         }
         return false;
     }
 
-    private static TypeModel? CreateTypeModelForDerived(
+    internal static TypeModel? CreateTypeModelForDerived(
         INamedTypeSymbol derivedType,
         Compilation compilation,
         bool nullabilityEnabled,
-        TargetFramework targetFramework)
+        TargetFramework targetFramework,
+        ExternalIgnoreRegistry externalIgnores)
     {
-        return TypeAnalyzer.HasClonableAttribute(derivedType) ? 
-            CreateMinimalTypeModel(derivedType, compilation, nullabilityEnabled, targetFramework, hasOwnClonable: true) : 
-            CreateFullTypeModel(derivedType, compilation, nullabilityEnabled, targetFramework);
+        return TypeAnalyzer.HasClonableAttribute(derivedType) ?
+            CreateMinimalTypeModel(derivedType, compilation, nullabilityEnabled, targetFramework, hasOwnClonable: true) :
+            CreateFullTypeModel(derivedType, compilation, nullabilityEnabled, targetFramework, externalIgnores);
     }
 
     private static TypeModel CreateMinimalTypeModel(
@@ -150,11 +166,12 @@ internal static class DerivedTypeCollector
         INamedTypeSymbol derivedType,
         Compilation compilation,
         bool nullabilityEnabled,
-        TargetFramework targetFramework)
+        TargetFramework targetFramework,
+        ExternalIgnoreRegistry externalIgnores)
     {
         bool isFastClonerAvailable = compilation.GetTypeByMetadataName("FastCloner.FastCloner") != null;
         
-        List<MemberAnalysis> memberAnalyses = MemberCollector.GetMembers(derivedType, compilation, nullabilityEnabled);
+        List<MemberAnalysis> memberAnalyses = MemberCollector.GetMembers(derivedType, compilation, nullabilityEnabled, externalIgnores);
         
         Dictionary<string, TypeModel> relatedTypes = new Dictionary<string, TypeModel>();
         Dictionary<ITypeSymbol, TypeModel?> implicitCache = new Dictionary<ITypeSymbol, TypeModel?>(SymbolEqualityComparer.Default);
@@ -170,7 +187,7 @@ internal static class DerivedTypeCollector
             
             if (memberModel.TypeKind is MemberTypeKind.Other or MemberTypeKind.Implicit)
             {
-                if (ImplicitTypeAnalyzer.TryAnalyze(memberType, compilation, nullabilityEnabled, targetFramework, implicitCache, processingStack, out TypeModel? implicitModel))
+                if (ImplicitTypeAnalyzer.TryAnalyze(memberType, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitModel))
                 {
                     memberModel = memberModel with 
                     { 
@@ -215,7 +232,7 @@ internal static class DerivedTypeCollector
 
                     if (elemType != null && memberModel is { ElementIsSafe: false, ElementHasClonableAttr: false })
                     {
-                        if (ImplicitTypeAnalyzer.TryAnalyze(elemType, compilation, nullabilityEnabled, targetFramework, implicitCache, processingStack, out TypeModel? implicitModel))
+                        if (ImplicitTypeAnalyzer.TryAnalyze(elemType, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitModel))
                         {
                             if (implicitModel != null)
                             {
@@ -240,7 +257,7 @@ internal static class DerivedTypeCollector
                     {
                         if (memberModel is { KeyIsSafe: false, KeyIsClonable: false })
                         {
-                            if (ImplicitTypeAnalyzer.TryAnalyze(dictTypes.Value.KeyType, compilation, nullabilityEnabled, targetFramework, implicitCache, processingStack, out TypeModel? implicitKey))
+                            if (ImplicitTypeAnalyzer.TryAnalyze(dictTypes.Value.KeyType, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitKey))
                             {
                                 if (implicitKey != null)
                                 {
@@ -260,7 +277,7 @@ internal static class DerivedTypeCollector
 
                         if (memberModel is { ValueIsSafe: false, ValueIsClonable: false })
                         {
-                            if (ImplicitTypeAnalyzer.TryAnalyze(dictTypes.Value.ValueType, compilation, nullabilityEnabled, targetFramework, implicitCache, processingStack, out TypeModel? implicitVal))
+                            if (ImplicitTypeAnalyzer.TryAnalyze(dictTypes.Value.ValueType, compilation, nullabilityEnabled, targetFramework, externalIgnores, implicitCache, processingStack, out TypeModel? implicitVal))
                             {
                                 if (implicitVal != null)
                                 {
@@ -335,7 +352,7 @@ internal static class DerivedTypeCollector
             hasParameterlessConstructor,
             CodeAnalysisAvailable: compilation.GetTypeByMetadataName("System.Diagnostics.CodeAnalysis.NotNullIfNotNullAttribute") != null,
             TargetFramework: targetFramework,
-            new EquatableArray<string>(circRefLog.ToArray()));
+            CircularAnalysisLog: new EquatableArray<string>(circRefLog.ToArray()));
     }
     
     private static bool? GetPreserveIdentityFromType(INamedTypeSymbol symbol)
@@ -365,6 +382,7 @@ internal static class DerivedTypeCollector
         private readonly Compilation _compilation;
         private readonly bool _nullabilityEnabled;
         private readonly TargetFramework _targetFramework;
+        private readonly ExternalIgnoreRegistry _externalIgnores;
         private readonly List<TypeModel> _derivedTypes;
         private readonly HashSet<ITypeSymbol> _processedTypes;
 
@@ -373,6 +391,7 @@ internal static class DerivedTypeCollector
             Compilation compilation,
             bool nullabilityEnabled,
             TargetFramework targetFramework,
+            ExternalIgnoreRegistry externalIgnores,
             List<TypeModel> derivedTypes,
             HashSet<ITypeSymbol> processedTypes)
         {
@@ -380,6 +399,7 @@ internal static class DerivedTypeCollector
             _compilation = compilation;
             _nullabilityEnabled = nullabilityEnabled;
             _targetFramework = targetFramework;
+            _externalIgnores = externalIgnores;
             _derivedTypes = derivedTypes;
             _processedTypes = processedTypes;
         }
@@ -394,11 +414,14 @@ internal static class DerivedTypeCollector
 
         public override void VisitNamedType(INamedTypeSymbol symbol)
         {
-            if (symbol is { IsAbstract: false, TypeKind: TypeKind.Class } &&
+            // Generic declarations (TypedRepo<U>) are skipped: only their closed
+            // constructions, registered via [FastClonerInclude(typeof(TypedRepo<int>))],
+            // can appear in generated dispatch code.
+            if (symbol is { IsAbstract: false, IsGenericType: false, TypeKind: TypeKind.Class } &&
                 IsDerivedFrom(symbol, _baseType) &&
                 _processedTypes.Add(symbol))
             {
-                TypeModel? model = CreateTypeModelForDerived(symbol, _compilation, _nullabilityEnabled, _targetFramework);
+                TypeModel? model = CreateTypeModelForDerived(symbol, _compilation, _nullabilityEnabled, _targetFramework, _externalIgnores);
                 if (model != null)
                 {
                     _derivedTypes.Add(model);

@@ -147,6 +147,7 @@ internal static class FastClonerCache
         public bool ContainsIgnoredMembers { get; init; }
         public bool HasDirectSelfReference { get; init; }
         public MemberInfo[]? MembersExcludedByVisibility { get; init; }
+        public bool HasWeaverStateFields { get; init; }
     }
 
     internal static readonly ConcurrentDictionary<Type, CloneBehavior> TypeBehaviors = [];

@@ -13,7 +13,7 @@ internal static class GenericUsageCollector
         return node is GenericNameSyntax;
     }
 
-    public static EquatableArray<GenericUsage> Collect(GeneratorSyntaxContext context, TargetFramework targetFramework, CancellationToken cancellationToken)
+    public static EquatableArray<GenericUsage> Collect(GeneratorSyntaxContext context, TargetFramework targetFramework, ExternalIgnoreRegistry externalIgnores, CancellationToken cancellationToken)
     {
         GenericNameSyntax node = (GenericNameSyntax)context.Node;
         INamedTypeSymbol? symbol = context.SemanticModel.GetSymbolInfo(node, cancellationToken).Symbol as INamedTypeSymbol;
@@ -34,7 +34,7 @@ internal static class GenericUsageCollector
 
         foreach (ITypeSymbol? typeArg in symbol.TypeArguments)
         {
-            GenericUsage? usage = GenericTypeAnalyzer.Analyze(symbol, typeArg, compilation, nullability, targetFramework);
+            GenericUsage? usage = GenericTypeAnalyzer.Analyze(symbol, typeArg, compilation, nullability, targetFramework, externalIgnores);
             if (usage.HasValue)
             {
                 usages.Add(usage.Value);

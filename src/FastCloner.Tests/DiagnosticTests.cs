@@ -352,6 +352,213 @@ public class TestClass2
             $"Found: {string.Join("; ", nullableWarnings.Select(d => $"{d.Id}: {d.GetMessage()}"))}");
     }
 
+    [Test]
+    public async Task GeneratedCode_ForAbstractClonableWithClonableDerived_ShouldNotProduceNullableWarnings()
+    {
+        // Regression test: an abstract [FastClonerClonable] type with derived types that also carry
+        // [FastClonerClonable] dispatches to the derived extension's InternalFastDeepClone, which returns
+        // a nullable reference. The generated dispatcher must not cast that result to a non-nullable type.
+        string source = @"
+#nullable enable
+using FastCloner.SourceGenerator.Shared;
+
+namespace TestNamespace;
+
+[FastClonerClonable]
+public abstract class Animal;
+
+[FastClonerClonable]
+public class Dog : Animal
+{
+    public string Bark { get; set; } = string.Empty;
+}
+
+[FastClonerClonable]
+public class Cat : Animal
+{
+    public string Meow { get; set; } = string.Empty;
+}
+
+public static class CloningVat
+{
+    public static Animal Clone(Animal animal) => animal.FastDeepClone()!;
+}
+";
+        (ImmutableArray<Diagnostic> _, ImmutableArray<Diagnostic> compilationDiags) = RunGeneratorAndCompile(source);
+
+        List<Diagnostic> nullableWarnings = compilationDiags
+            .Where(d => d.Id is "CS8604" or "CS8602" or "CS8600" or "CS8601" or "CS8603")
+            .Where(d => d.Severity == DiagnosticSeverity.Warning)
+            .ToList();
+
+        await Assert.That(nullableWarnings).IsEmpty().Because("Generated dispatcher for abstract clonable types should not produce nullable warnings. " +
+            $"Found: {string.Join("; ", nullableWarnings.Select(d => $"{d.Id}: {d.GetMessage()}"))}");
+    }
+
+    #region Polymorphic attribute validation
+
+    [Test]
+    public async Task Polymorphic_OnSealedClass_Should_Report_FCG011()
+    {
+        // Arrange
+        string source = @"
+using FastCloner.SourceGenerator.Shared;
+
+namespace TestNamespace;
+
+[FastClonerClonable]
+[FastClonerPolymorphic]
+public sealed class SealedRoot
+{
+    public int Value { get; set; }
+}
+";
+        // Act
+        ImmutableArray<Diagnostic> diagnostics = RunGenerator(source);
+
+        // Assert
+        Diagnostic? fcg011 = diagnostics.FirstOrDefault(d => d.Id == "FCG011");
+        await Assert.That(fcg011).IsNotNull().Because("Sealed classes cannot have subtypes, so [FastClonerPolymorphic] has no effect");
+    }
+
+    [Test]
+    public async Task Polymorphic_WithoutClonable_Should_Report_FCG012()
+    {
+        // Arrange
+        string source = @"
+using FastCloner.SourceGenerator.Shared;
+
+namespace TestNamespace;
+
+[FastClonerPolymorphic]
+public class NotClonable
+{
+    public int Value { get; set; }
+}
+";
+        // Act
+        ImmutableArray<Diagnostic> diagnostics = RunGenerator(source);
+
+        // Assert
+        Diagnostic? fcg012 = diagnostics.FirstOrDefault(d => d.Id == "FCG012");
+        await Assert.That(fcg012).IsNotNull().Because("[FastClonerPolymorphic] requires [FastClonerClonable] to have any effect");
+    }
+
+    [Test]
+    public async Task Polymorphic_OnGenericClass_Should_Be_Supported_Without_MisuseDiagnostics()
+    {
+        // Generic roots are supported: closed constructions of subtypes are dispatched.
+        // Arrange
+        string source = @"
+using FastCloner.SourceGenerator.Shared;
+
+namespace TestNamespace;
+
+[FastClonerClonable]
+[FastClonerPolymorphic]
+public class GenericRoot<T>
+{
+    public int Value { get; set; }
+}
+
+public class StringRoot : GenericRoot<string>
+{
+    public bool Flag { get; set; }
+}
+";
+        // Act
+        ImmutableArray<Diagnostic> diagnostics = RunGenerator(source);
+
+        // Assert
+        Diagnostic? misuse = diagnostics.FirstOrDefault(d => d.Id is "FCG011" or "FCG012" or "FCG013");
+        await Assert.That(misuse).IsNull().Because("generic roots are valid polymorphic cloning roots");
+    }
+
+    [Test]
+    public async Task Polymorphic_OnAbstractClass_Should_Not_Report_Misuse()
+    {
+        // Arrange - abstract types dispatch by runtime type already; the attribute
+        // is accepted as explicit self-documentation.
+        string source = @"
+using FastCloner.SourceGenerator.Shared;
+
+namespace TestNamespace;
+
+[FastClonerClonable]
+[FastClonerPolymorphic]
+public abstract class AbstractRoot
+{
+    public int Value { get; set; }
+}
+";
+        // Act
+        ImmutableArray<Diagnostic> diagnostics = RunGenerator(source);
+
+        // Assert
+        Diagnostic? misuse = diagnostics.FirstOrDefault(d => d.Id is "FCG011" or "FCG012" or "FCG013");
+        await Assert.That(misuse).IsNull().Because("[FastClonerPolymorphic] on an abstract clonable root is valid");
+    }
+
+    [Test]
+    public async Task PlainClonable_GeneratedSource_Should_Not_Contain_TypeDispatch()
+    {
+        // Zero-cost guard: types that do not opt into [FastClonerPolymorphic] must not
+        // pay for it - their generated code contains no runtime type check at all.
+        // Arrange
+        string source = @"
+using FastCloner.SourceGenerator.Shared;
+
+namespace TestNamespace;
+
+[FastClonerClonable]
+public class SimpleClass
+{
+    public int Value { get; set; }
+    public string Name { get; set; }
+}
+";
+        // Act
+        List<(string HintName, string Text)> generated = RunGeneratorAndGetSources(source);
+        string combined = string.Join("\n", generated.Select(g => g.Text));
+
+        // Assert
+        await Assert.That(combined).Contains("FastDeepClone").Because("the cloner must be generated");
+        await Assert.That(combined).DoesNotContain("GetType()").Because("plain clonables must not pay any dispatch cost");
+    }
+
+    [Test]
+    public async Task PolymorphicRoot_GeneratedSource_Should_Check_ExactType_First()
+    {
+        // Arrange
+        string source = @"
+using FastCloner.SourceGenerator.Shared;
+
+namespace TestNamespace;
+
+[FastClonerClonable]
+[FastClonerPolymorphic]
+public class PolyRoot
+{
+    public int Value { get; set; }
+}
+
+public class PolySub : PolyRoot
+{
+    public bool Flag { get; set; }
+}
+";
+        // Act
+        List<(string HintName, string Text)> generated = RunGeneratorAndGetSources(source);
+        string combined = string.Join("\n", generated.Select(g => g.Text));
+
+        // Assert - public method guards with an exact-type check before falling back to dispatch
+        await Assert.That(combined).Contains("source.GetType() != typeof(");
+        // internal dispatcher branches on exact runtime types of discovered subtypes
+        await Assert.That(combined).Contains("runtimeType == typeof(");
+    }
+
+    #endregion
+
     // Helper method to run the generator (returns only generator diagnostics)
     private static ImmutableArray<Diagnostic> RunGenerator(string source)
     {
@@ -413,6 +620,40 @@ public class TestClass2
 
         ImmutableArray<Diagnostic> compilationDiags = outputCompilation.GetDiagnostics();
         return (generatorDiags, compilationDiags);
+    }
+
+    /// <summary>
+    /// Runs the generator and returns the generated sources (hint name + text)
+    /// for structural assertions about emitted code.
+    /// </summary>
+    private static List<(string HintName, string Text)> RunGeneratorAndGetSources(string source)
+    {
+        SyntaxTree syntaxTree = CSharpSyntaxTree.ParseText(source);
+
+        List<MetadataReference> references =
+        [
+            MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
+            MetadataReference.CreateFromFile(typeof(FastClonerClonableAttribute).Assembly.Location),
+            MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("System.Runtime").Location),
+            MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("netstandard").Location)
+        ];
+
+        CSharpCompilation compilation = CSharpCompilation.Create(
+            "TestAssembly",
+            [syntaxTree],
+            references,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary));
+
+        FastClonerIncrementalGenerator generator = new FastClonerIncrementalGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGenerators(compilation);
+        GeneratorDriverRunResult result = driver.GetRunResult();
+
+        return result.Results
+            .SelectMany(r => r.GeneratedSources)
+            .Select(g => (g.HintName, g.SourceText.ToString()))
+            .ToList();
     }
 
     public class UnclonableClass

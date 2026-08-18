@@ -152,6 +152,30 @@ public class AbstractClassTests
 
     #endregion
 
+    #region Test Classes - Abstract Base with Clonable Derived Types
+
+    // Both the abstract base and the derived types carry [FastClonerClonable].
+    // The abstract dispatcher must delegate to each derived type's own generated cloner.
+    [FastClonerClonable]
+    public abstract class Creature
+    {
+        public string? Name { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class Puppy : Creature
+    {
+        public string? Bark { get; set; }
+    }
+
+    [FastClonerClonable]
+    public class Kitten : Creature
+    {
+        public string? Meow { get; set; }
+    }
+
+    #endregion
+
     #region Tests - Basic Abstract Class Cloning
     
     [Test]
@@ -210,6 +234,33 @@ public class AbstractClassTests
         await Assert.That(clonedCat.Age).IsEqualTo(3);
         await Assert.That(clonedCat.Color).IsEqualTo("Orange");
         await Assert.That(clonedCat.IsIndoor).IsTrue();
+    }
+
+    [Test]
+    [SourceGeneratorCompatible]
+    public async Task Abstract_With_ClonableDerived_Should_Dispatch_To_Derived_Clone()
+    {
+        // Arrange - derived types have their own [FastClonerClonable], so the abstract
+        // dispatcher delegates to their generated cloners instead of inline helpers
+        Puppy puppy = new Puppy { Name = "Rex", Bark = "Woof" };
+        Kitten kitten = new Kitten { Name = "Mia", Meow = "Purr" };
+
+        // Act - Clone via abstract base type
+        Creature creature = puppy;
+        Creature? puppyClone = creature.FastDeepClone();
+        Creature? kittenClone = ((Creature)kitten).FastDeepClone();
+
+        // Assert - runtime type is preserved and members are copied
+        await Assert.That(puppyClone).IsNotNull();
+        await Assert.That(puppyClone).IsTypeOf<Puppy>();
+        await Assert.That(puppyClone).IsNotSameReferenceAs(puppy);
+        await Assert.That(((Puppy)puppyClone!).Name).IsEqualTo("Rex");
+        await Assert.That(((Puppy)puppyClone).Bark).IsEqualTo("Woof");
+
+        await Assert.That(kittenClone).IsNotNull();
+        await Assert.That(kittenClone).IsTypeOf<Kitten>();
+        await Assert.That(((Kitten)kittenClone!).Name).IsEqualTo("Mia");
+        await Assert.That(((Kitten)kittenClone).Meow).IsEqualTo("Purr");
     }
 
     #endregion

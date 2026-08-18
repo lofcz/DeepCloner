@@ -24,16 +24,50 @@ internal static class MemberCollector
     public static List<MemberAnalysis> GetMembers(
         INamedTypeSymbol symbol,
         Compilation compilation,
-        bool nullabilityEnabled)
+        bool nullabilityEnabled,
+        ExternalIgnoreRegistry externalIgnores)
     {
         List<MemberAnalysis> members = [];
         HashSet<string> seenNames = [];
         FastClonerMemberVisibility visibilityPolicy = GetVisibilityPolicyFromType(symbol);
 
+        // Resolved external-ignore sets per declaring assembly (null = none registered).
+        // Registry lookups are string-keyed; symbol-keyed memoization keeps it to one
+        // lookup per distinct assembly in the inheritance chain.
+        Dictionary<IAssemblySymbol, HashSet<string>?>? resolvedByAssembly = externalIgnores.IsEmpty
+            ? null
+            : new Dictionary<IAssemblySymbol, HashSet<string>?>(SymbolEqualityComparer.Default);
+
+        HashSet<string>? ResolveExternalIgnores(IAssemblySymbol containing)
+        {
+            if (resolvedByAssembly == null)
+                return null;
+
+            if (!resolvedByAssembly.TryGetValue(containing, out HashSet<string>? resolved))
+            {
+                string displayName = containing.Identity.GetDisplayName();
+                resolved = null;
+                foreach (ExternalIgnoreAssemblyRegistration registration in externalIgnores.Registrations)
+                {
+                    if (registration.AssemblyName == displayName)
+                    {
+                        resolved = [.. registration.AttributeTypeFqns];
+                        break;
+                    }
+                }
+
+                resolvedByAssembly[containing] = resolved;
+            }
+
+            return resolved;
+        }
+
         // Get all members from base types too (walking up the inheritance chain)
         INamedTypeSymbol? currentType = symbol;
         while (currentType != null && currentType.SpecialType != SpecialType.System_Object)
         {
+            HashSet<string>? assemblyExternalIgnores = ResolveExternalIgnores(currentType.ContainingAssembly);
+
             foreach (ISymbol? member in currentType.GetMembers())
             {
                 if (member.IsStatic || member.IsImplicitlyDeclared)
@@ -52,18 +86,18 @@ internal static class MemberCollector
 
                         if (hasSetter || isPopulatableCollection)
                         {
-                            MemberCloneBehavior behavior = GetMemberBehavior(property, compilation);
+                            MemberCloneBehavior behavior = GetMemberBehavior(property, property.Type, compilation, assemblyExternalIgnores);
                             if (behavior == MemberCloneBehavior.Ignore)
                                 continue;
-                            
+
                             if (!HasExplicitMemberBehaviorAttribute(property, compilation))
                             {
                                 FastClonerMemberVisibility memberMask = PropertyVisibilityMask(property);
                                 if ((visibilityPolicy & memberMask) == 0)
                                     continue;
                             }
-                            
-                            if (IsRedundantNonAutoPropertyClonedThroughField(property, visibilityPolicy, compilation))
+
+                            if (IsRedundantNonAutoPropertyClonedThroughField(property, visibilityPolicy, compilation, assemblyExternalIgnores))
                                 continue;
 
                             members.Add(new MemberAnalysis(MemberModel.Create(property, nullabilityEnabled, compilation, behavior), property.Type));
@@ -74,7 +108,7 @@ internal static class MemberCollector
                 {
                     if (field.IsConst) continue; // Skip const fields
 
-                    MemberCloneBehavior behavior = GetMemberBehavior(field, compilation);
+                    MemberCloneBehavior behavior = GetMemberBehavior(field, field.Type, compilation, assemblyExternalIgnores);
                     if (behavior == MemberCloneBehavior.Ignore)
                         continue;
 
@@ -276,9 +310,15 @@ internal static class MemberCollector
     /// Gets the clone behavior for a member by checking:
     /// 1. Member-level FastClonerBehaviorAttribute (highest priority)
     /// 2. [NonSerialized] attribute (treat as Ignore)
-    /// 3. Type-level FastClonerBehaviorAttribute on the member's type (lowest priority)
+    /// 3. External ignore attributes registered for the declaring assembly via
+    ///    [assembly: FastClonerExternalIgnore(...)] (treat as Ignore)
+    /// 4. Type-level FastClonerBehaviorAttribute on the member's type (lowest priority)
     /// </summary>
-    private static MemberCloneBehavior GetMemberBehavior(ISymbol member, ITypeSymbol memberType, Compilation compilation)
+    private static MemberCloneBehavior GetMemberBehavior(
+        ISymbol member,
+        ITypeSymbol memberType,
+        Compilation compilation,
+        HashSet<string>? externalIgnores)
     {
         // Get all relevant attribute types
         INamedTypeSymbol? behaviorAttribute = compilation.GetTypeByMetadataName("FastCloner.Code.FastClonerBehaviorAttribute");
@@ -288,6 +328,7 @@ internal static class MemberCollector
         INamedTypeSymbol? nonSerializedAttribute = compilation.GetTypeByMetadataName("System.NonSerializedAttribute");
 
         // 1. Check for member-level attributes first (highest priority)
+        bool hasExternalIgnore = false;
         foreach (AttributeData attr in member.GetAttributes())
         {
             INamedTypeSymbol? attrClass = attr.AttributeClass;
@@ -330,36 +371,39 @@ internal static class MemberCollector
             {
                 return MemberCloneBehavior.Ignore;
             }
+
+            // Track external ignore matches without returning: explicit FastCloner attributes
+            // elsewhere on the member must keep priority regardless of attribute ordering.
+            if (externalIgnores != null && !hasExternalIgnore)
+            {
+                for (INamedTypeSymbol? candidate = attrClass;
+                     candidate is { SpecialType: not SpecialType.System_Object };
+                     candidate = candidate.BaseType)
+                {
+                    if (externalIgnores.Contains(candidate.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)))
+                    {
+                        hasExternalIgnore = true;
+                        break;
+                    }
+                }
+            }
         }
 
-        // 2. Check for type-level attribute on the member's type
+        // 2. Registered external ignore attributes (e.g. JsonIgnore, BsonIgnore, NotMapped)
+        if (hasExternalIgnore)
+            return MemberCloneBehavior.Ignore;
+
+        // 3. Check for type-level attribute on the member's type
         MemberCloneBehavior? typeBehavior = GetTypeBehavior(memberType, compilation);
-        
+
         return typeBehavior ?? MemberCloneBehavior.Clone;
     }
 
-    /// <summary>
-    /// Gets the clone behavior for a member (overload for backward compatibility).
-    /// </summary>
-    private static MemberCloneBehavior GetMemberBehavior(ISymbol member, Compilation compilation)
-    {
-        ITypeSymbol? memberType = member switch
-        {
-            IFieldSymbol f => f.Type,
-            IPropertySymbol p => p.Type,
-            IEventSymbol e => e.Type,
-            _ => null
-        };
-
-        return memberType != null 
-            ? GetMemberBehavior(member, memberType, compilation) 
-            : MemberCloneBehavior.Clone;
-    }
-    
     private static bool IsRedundantNonAutoPropertyClonedThroughField(
         IPropertySymbol property,
         FastClonerMemberVisibility visibilityPolicy,
-        Compilation compilation)
+        Compilation compilation,
+        HashSet<string>? externalIgnores)
     {
         if (property.SetMethod == null)
             return false;
@@ -373,7 +417,7 @@ internal static class MemberCollector
             return false;
 
         IFieldSymbol? target = TryGetSimpleSetterTargetField(property, compilation);
-        return target != null && WillFieldBeCollected(target, visibilityPolicy, compilation);
+        return target != null && WillFieldBeCollected(target, visibilityPolicy, compilation, externalIgnores);
     }
     
     private static IFieldSymbol? TryGetSimpleSetterTargetField(IPropertySymbol property, Compilation compilation)
@@ -420,12 +464,13 @@ internal static class MemberCollector
     private static bool WillFieldBeCollected(
         IFieldSymbol field,
         FastClonerMemberVisibility visibilityPolicy,
-        Compilation compilation)
+        Compilation compilation,
+        HashSet<string>? externalIgnores)
     {
         if (field.IsConst || field.IsStatic || field.IsImplicitlyDeclared)
             return false;
 
-        MemberCloneBehavior behavior = GetMemberBehavior(field, compilation);
+        MemberCloneBehavior behavior = GetMemberBehavior(field, field.Type, compilation, externalIgnores);
         if (behavior == MemberCloneBehavior.Ignore)
             return false;
 
