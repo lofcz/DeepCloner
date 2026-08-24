@@ -59,6 +59,13 @@ internal static class NestedTypeCollector
                  bool requiresFastCloner = (!keySafe && !keyClon) || (!valSafe && !valClon);
 
                  CollectionKind collKind = TypeAnalyzer.GetCollectionKind(type);
+                 CollectionCapabilities caps = TypeAnalyzer.GetCollectionCapabilities(type, collKind, compilation, isDictionary: true);
+
+                 // Without a verified constructor/API surface no helper is registered; consumers of the
+                 // element type then fall back to the runtime cloner instead of broken generated code.
+                 if (!TypeAnalyzer.CanGenerateDictionaryHelper(type, collKind, caps))
+                     return;
+
                  string keyTypeName = dictTypes.Value.KeyType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                  string valTypeName = dictTypes.Value.ValueType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                  string concreteType = TypeAnalyzer.GetConcreteTypeForCollection(type, collKind, $"{keyTypeName}, {valTypeName}");
@@ -84,7 +91,10 @@ internal static class NestedTypeCollector
                     true,  // HasGetter - helper methods always have access
                     true,  // HasSetter - helper methods always have access
                     true,  // SetterIsAccessible - helper methods always have access
-                    MemberCloneBehavior.Clone  // MemberBehavior - helper methods use default cloning
+                    MemberCloneBehavior.Clone,  // MemberBehavior - helper methods use default cloning
+                    ConcreteIsList: caps.IsExactList,
+                    ConcreteHasCapacityCtor: caps.HasCapacityCtor,
+                    ConcreteHasCopyCtor: caps.HasCopyCtor
                  );
                  
                  if (!nestedTypes.ContainsKey(model.TypeFullName))
@@ -104,10 +114,21 @@ internal static class NestedTypeCollector
                  
                  CollectionKind collectionKind = CollectionKind.None;
                  string? concreteType = null;
+                 CollectionCapabilities caps = default;
+
+                 bool collHasCount = kind == MemberTypeKind.Collection && TypeAnalyzer.CollectionHasCountProperty(type);
+                 bool collHasIndexer = kind == MemberTypeKind.Collection && TypeAnalyzer.CollectionHasIndexer(type);
 
                  if (kind == MemberTypeKind.Collection)
                  {
                      collectionKind = TypeAnalyzer.GetCollectionKind(type);
+                     caps = TypeAnalyzer.GetCollectionCapabilities(type, collectionKind, compilation, isDictionary: false);
+
+                     // Without a verified constructor/API surface no helper is registered; consumers of the
+                     // element type then fall back to the runtime cloner instead of broken generated code.
+                     if (!TypeAnalyzer.CanGenerateCollectionHelper(type, collectionKind, caps, collHasCount))
+                         return;
+
                      concreteType = TypeAnalyzer.GetConcreteTypeForCollection(type, collectionKind, elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
                  }
 
@@ -122,8 +143,6 @@ internal static class NestedTypeCollector
                      }
                  }
 
-                 bool collHasCount = kind == MemberTypeKind.Collection && TypeAnalyzer.CollectionHasCountProperty(type);
-                 bool collHasIndexer = kind == MemberTypeKind.Collection && TypeAnalyzer.CollectionHasIndexer(type);
                  string? elemClonableExtClass = elemClon ? TypeAnalyzer.ComputeExtensionClassFqn(elemType) : null;
 
                  MemberModel model = new MemberModel(
@@ -150,7 +169,10 @@ internal static class NestedTypeCollector
                     null,  // PreserveIdentity
                     collHasCount,
                     collHasIndexer,
-                    ElementClonableExtensionClass: elemClonableExtClass
+                    ElementClonableExtensionClass: elemClonableExtClass,
+                    ConcreteIsList: caps.IsExactList,
+                    ConcreteHasCapacityCtor: caps.HasCapacityCtor,
+                    ConcreteHasCopyCtor: caps.HasCopyCtor
                  );
 
                  if (!nestedTypes.ContainsKey(model.TypeFullName))

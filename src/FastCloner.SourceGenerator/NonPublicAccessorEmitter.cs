@@ -250,23 +250,25 @@ internal static class NonPublicAccessorEmitter
 
     private static string ProduceClonedExpression(CloneGeneratorContext context, MemberModel member, string readExpression, string stateVar)
     {
+        // Null-forgiving operators: the accessor signatures drop nullability annotations, so a
+        // legitimately nullable member value would otherwise raise CS8601/CS8604 in generated code.
         if (member.IsShallowClone)
-            return readExpression;
+            return $"{readExpression}!";
 
         switch (member.TypeKind)
         {
             case MemberTypeKind.Safe:
-                return readExpression;
+                return $"{readExpression}!";
 
             case MemberTypeKind.Clonable:
-                return $"{member.ClonableExtensionClass}.InternalFastDeepClone({readExpression}, {stateVar})";
+                return $"{member.ClonableExtensionClass}.InternalFastDeepClone({readExpression}, {stateVar})!";
             
             default:
                 if (context.IsFastClonerAvailable)
                 {
                     return $"({member.TypeFullName})({CloneGeneratorContext.FastClonerDeepCloneCall(readExpression)}!)";
                 }
-                return readExpression;
+                return $"{readExpression}!";
         }
     }
 

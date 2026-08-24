@@ -5,10 +5,43 @@ using Microsoft.CodeAnalysis;
 namespace FastCloner.SourceGenerator;
 
 /// <summary>
+/// Constructor/API surface of the concrete type that generated collection code will instantiate.
+/// Computed from the type symbol instead of assumed from <see cref="CollectionKind"/>, because the
+/// kind buckets are coarse: e.g. Collection&lt;T&gt;, BindingList&lt;T&gt; and user-defined collections all land
+/// in <see cref="CollectionKind.List"/> but share none of List&lt;T&gt;'s constructor surface (issue #50).
+/// </summary>
+internal readonly record struct CollectionCapabilities(
+    bool IsExactList,             // Concrete type is System.Collections.Generic.List<T>, so CollectionsMarshal is valid
+    bool HasCapacityCtor,         // Public .ctor(int capacity)
+    bool HasCopyCtor,             // Public ctor known to COPY the source (IEnumerable<T> by BCL convention; Dictionary<K,V> for dictionaries)
+    bool HasParameterlessCtor,    // Public .ctor()
+    bool HasAddMethod);           // Public Add/Enqueue/Push/AddLast matching the collection kind
+
+/// <summary>
 /// Utility class for analyzing types during code generation.
 /// </summary>
 internal static class TypeAnalyzer
 {
+    private static readonly HashSet<string> KnownCollectionInterfaces =
+    [
+        "System.Collections.Generic.IEnumerable`1",
+        "System.Collections.Generic.ICollection`1",
+        "System.Collections.Generic.IList`1",
+        "System.Collections.Generic.IReadOnlyList`1",
+        "System.Collections.Generic.IReadOnlyCollection`1",
+        "System.Collections.Generic.ISet`1",
+        "System.Collections.Generic.IReadOnlySet`1",
+        "System.Collections.IEnumerable",
+        "System.Collections.ICollection",
+        "System.Collections.IList",
+    ];
+
+    private static readonly HashSet<string> KnownDictionaryInterfaces =
+    [
+        "System.Collections.Generic.IDictionary`2",
+        "System.Collections.Generic.IReadOnlyDictionary`2",
+    ];
+
     /// <summary>
     /// Determines if a type is safe to copy directly without cloning.
     /// </summary>
@@ -511,6 +544,224 @@ internal static class TypeAnalyzer
     }
 
     /// <summary>
+    /// Computes <see cref="CollectionCapabilities"/> for the concrete type that generated code will
+    /// instantiate: the type itself when it is a concrete class/struct, otherwise the BCL
+    /// implementation that <see cref="GetConcreteTypeForCollection"/> maps the interface/abstract type to.
+    /// </summary>
+    public static CollectionCapabilities GetCollectionCapabilities(ITypeSymbol type, CollectionKind kind, Compilation compilation, bool isDictionary)
+    {
+        ITypeSymbol? concrete = type;
+
+        if (type.TypeKind == TypeKind.Interface || type.IsAbstract)
+        {
+            concrete = compilation.GetTypeByMetadataName(GetConcreteMetadataNameForKind(kind, isDictionary));
+
+            // Mapped BCL type not resolvable: assume only the lowest common denominator (parameterless ctor + Add).
+            if (concrete == null)
+                return new CollectionCapabilities(false, false, false, true, true);
+        }
+
+        if (concrete is not INamedTypeSymbol named)
+            return new CollectionCapabilities(false, false, false, false, false);
+
+        bool isExactList = !isDictionary && GetFullMetadataName(named.OriginalDefinition) == "System.Collections.Generic.List`1";
+
+        bool hasCapacityCtor = false;
+        bool hasCopyCtor = false;
+        bool hasParameterlessCtor = named.IsValueType;
+
+        foreach (IMethodSymbol ctor in named.Constructors)
+        {
+            if (ctor.IsStatic || ctor.DeclaredAccessibility != Accessibility.Public)
+                continue;
+
+            if (ctor.Parameters.Length == 0)
+            {
+                hasParameterlessCtor = true;
+            }
+            else if (ctor.Parameters.Length == 1)
+            {
+                IParameterSymbol param = ctor.Parameters[0];
+
+                // Require the BCL parameter name so an unrelated .ctor(int id) is not misread as a capacity ctor.
+                if (param.Type.SpecialType == SpecialType.System_Int32 && param.Name == "capacity")
+                {
+                    hasCapacityCtor = true;
+                }
+                // Only a ctor taking exactly IEnumerable<T> is trusted to copy the elements. Ctors taking
+                // IList<T> (Collection<T>, BindingList<T>, ReadOnlyCollection<T>) wrap the passed list instead.
+                else if (!isDictionary && param.Type.OriginalDefinition.SpecialType == SpecialType.System_Collections_Generic_IEnumerable_T)
+                {
+                    hasCopyCtor = true;
+                }
+            }
+        }
+
+        // Dictionary<K,V>(IDictionary<K,V>) is documented to copy; for any other dictionary type the
+        // semantics of a dictionary-taking ctor are unknown (ReadOnlyDictionary wraps), so the copy
+        // fast-path is limited to the exact BCL Dictionary.
+        if (isDictionary)
+            hasCopyCtor = GetFullMetadataName(named.OriginalDefinition) == "System.Collections.Generic.Dictionary`2";
+
+        bool hasAddMethod = isDictionary
+            ? HasPublicInstanceMethod(named, kind == CollectionKind.ConcurrentDictionary ? "TryAdd" : "Add", 2)
+            : HasPublicInstanceMethod(named, GetAddMethodName(kind), 1);
+
+        return new CollectionCapabilities(isExactList, hasCapacityCtor, hasCopyCtor, hasParameterlessCtor, hasAddMethod);
+    }
+
+    /// <summary>
+    /// Whether a compiling, semantically correct clone helper can be generated for the collection type.
+    /// When this returns false the member falls back to the runtime cloner instead of getting a helper
+    /// that assumes an unverified constructor/API surface.
+    /// </summary>
+    public static bool CanGenerateCollectionHelper(ITypeSymbol type, CollectionKind kind, CollectionCapabilities caps, bool hasCount)
+    {
+        // Wrapper/immutable writers construct the exact BCL type and return it as the member's type;
+        // a derived class or a custom implementation of the immutable interfaces can't be produced that way.
+        string? requiredExactType = GetRequiredExactTypeForKind(kind);
+        if (requiredExactType != null)
+            return GetFullMetadataName(type.OriginalDefinition) == requiredExactType;
+
+        // Interfaces are viable only when the mapped BCL implementation actually implements them
+        // (a custom IMyCollection<T> can't be satisfied by a List<T>).
+        if (type.TypeKind == TypeKind.Interface)
+            return KnownCollectionInterfaces.Contains(GetFullMetadataName(type.OriginalDefinition));
+
+        // Abstract classes can't be instantiated and the List<T> fallback is not assignable to them.
+        if (type.IsAbstract)
+            return false;
+
+        bool canConstruct = caps.HasParameterlessCtor || (caps.HasCapacityCtor && hasCount);
+        return canConstruct && caps.HasAddMethod;
+    }
+
+    /// <summary>
+    /// Dictionary counterpart of <see cref="CanGenerateCollectionHelper"/>.
+    /// </summary>
+    public static bool CanGenerateDictionaryHelper(ITypeSymbol type, CollectionKind kind, CollectionCapabilities caps)
+    {
+        string? requiredExactType = GetRequiredExactTypeForKind(kind);
+        if (requiredExactType != null)
+            return GetFullMetadataName(type.OriginalDefinition) == requiredExactType;
+
+        if (type.TypeKind == TypeKind.Interface)
+            return KnownDictionaryInterfaces.Contains(GetFullMetadataName(type.OriginalDefinition));
+
+        if (type.IsAbstract)
+            return false;
+
+        // All dictionary sources expose Count, so a capacity ctor alone is enough to construct.
+        bool canConstruct = caps.HasParameterlessCtor || caps.HasCapacityCtor;
+        return canConstruct && caps.HasAddMethod;
+    }
+
+    /// <summary>
+    /// The element-appending method the generated code uses for a collection kind.
+    /// </summary>
+    public static string GetAddMethodName(CollectionKind kind)
+    {
+        return kind switch
+        {
+            CollectionKind.Queue or CollectionKind.ConcurrentQueue => "Enqueue",
+            CollectionKind.Stack or CollectionKind.ConcurrentStack => "Push",
+            CollectionKind.LinkedList => "AddLast",
+            _ => "Add"
+        };
+    }
+
+    /// <summary>
+    /// Checks for a public instance method with the given name and parameter count, including inherited ones.
+    /// </summary>
+    public static bool HasPublicInstanceMethod(ITypeSymbol type, string name, int parameterCount)
+    {
+        for (ITypeSymbol? current = type; current != null; current = current.BaseType)
+        {
+            foreach (ISymbol member in current.GetMembers(name))
+            {
+                if (member is IMethodSymbol { IsStatic: false, MethodKind: MethodKind.Ordinary } method &&
+                    method.DeclaredAccessibility == Accessibility.Public &&
+                    method.Parameters.Length == parameterCount)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Checks for a public settable single-parameter indexer (this[key] = value), including inherited ones.
+    /// </summary>
+    public static bool HasPublicSettableIndexer(ITypeSymbol type)
+    {
+        for (ITypeSymbol? current = type; current != null; current = current.BaseType)
+        {
+            foreach (ISymbol member in current.GetMembers())
+            {
+                if (member is IPropertySymbol { IsIndexer: true, Parameters.Length: 1, SetMethod: not null } indexer &&
+                    indexer.SetMethod!.DeclaredAccessibility == Accessibility.Public)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Metadata name of the BCL implementation instantiated for interface/abstract collection types.
+    /// Must stay in sync with <see cref="GetConcreteTypeForCollection"/>.
+    /// </summary>
+    private static string GetConcreteMetadataNameForKind(CollectionKind kind, bool isDictionary)
+    {
+        if (isDictionary)
+        {
+            return kind switch
+            {
+                CollectionKind.SortedDictionary => "System.Collections.Generic.SortedDictionary`2",
+                CollectionKind.SortedList => "System.Collections.Generic.SortedList`2",
+                CollectionKind.ConcurrentDictionary => "System.Collections.Concurrent.ConcurrentDictionary`2",
+                _ => "System.Collections.Generic.Dictionary`2",
+            };
+        }
+
+        return kind switch
+        {
+            CollectionKind.HashSet => "System.Collections.Generic.HashSet`1",
+            CollectionKind.SortedSet => "System.Collections.Generic.SortedSet`1",
+            CollectionKind.Queue => "System.Collections.Generic.Queue`1",
+            CollectionKind.Stack => "System.Collections.Generic.Stack`1",
+            CollectionKind.LinkedList => "System.Collections.Generic.LinkedList`1",
+            CollectionKind.ConcurrentQueue => "System.Collections.Concurrent.ConcurrentQueue`1",
+            CollectionKind.ConcurrentStack => "System.Collections.Concurrent.ConcurrentStack`1",
+            CollectionKind.ConcurrentBag => "System.Collections.Concurrent.ConcurrentBag`1",
+            CollectionKind.ObservableCollection => "System.Collections.ObjectModel.ObservableCollection`1",
+            _ => "System.Collections.Generic.List`1",
+        };
+    }
+
+    /// <summary>
+    /// For kinds whose helper writers hardcode the produced type, the exact metadata name the member
+    /// type must have; null for kinds without that restriction.
+    /// </summary>
+    private static string? GetRequiredExactTypeForKind(CollectionKind kind)
+    {
+        return kind switch
+        {
+            CollectionKind.ReadOnlyCollection => "System.Collections.ObjectModel.ReadOnlyCollection`1",
+            CollectionKind.ReadOnlyDictionary => "System.Collections.ObjectModel.ReadOnlyDictionary`2",
+            CollectionKind.ImmutableList => "System.Collections.Immutable.ImmutableList`1",
+            CollectionKind.ImmutableArray => "System.Collections.Immutable.ImmutableArray`1",
+            CollectionKind.ImmutableHashSet => "System.Collections.Immutable.ImmutableHashSet`1",
+            CollectionKind.ImmutableSortedSet => "System.Collections.Immutable.ImmutableSortedSet`1",
+            CollectionKind.ImmutableQueue => "System.Collections.Immutable.ImmutableQueue`1",
+            CollectionKind.ImmutableStack => "System.Collections.Immutable.ImmutableStack`1",
+            CollectionKind.ImmutableDictionary => "System.Collections.Immutable.ImmutableDictionary`2",
+            CollectionKind.ImmutableSortedDictionary => "System.Collections.Immutable.ImmutableSortedDictionary`2",
+            _ => null
+        };
+    }
+
+    /// <summary>
     /// Identifies the kind of collection (List, Set, Queue, etc.) for optimized code generation.
     /// </summary>
     public static CollectionKind GetCollectionKind(ITypeSymbol type)
@@ -532,10 +783,12 @@ internal static class TypeAnalyzer
         if (IsOrInheritsFrom(type, "System.Collections.Immutable.ImmutableList`1") || 
             HasInterface(type, "System.Collections.Immutable.IImmutableList`1")) return CollectionKind.ImmutableList;
 
+        // ImmutableSortedSet must be checked BEFORE ImmutableHashSet: it also implements
+        // IImmutableSet<T> and would otherwise be misclassified as a hash set.
+        if (IsOrInheritsFrom(type, "System.Collections.Immutable.ImmutableSortedSet`1")) return CollectionKind.ImmutableSortedSet;
+
         if (IsOrInheritsFrom(type, "System.Collections.Immutable.ImmutableHashSet`1") || 
             HasInterface(type, "System.Collections.Immutable.IImmutableSet`1")) return CollectionKind.ImmutableHashSet;
-            
-        if (IsOrInheritsFrom(type, "System.Collections.Immutable.ImmutableSortedSet`1")) return CollectionKind.ImmutableSortedSet;
 
         if (IsOrInheritsFrom(type, "System.Collections.Immutable.ImmutableQueue`1") || 
             HasInterface(type, "System.Collections.Immutable.IImmutableQueue`1")) return CollectionKind.ImmutableQueue;

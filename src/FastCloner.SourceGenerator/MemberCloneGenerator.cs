@@ -81,7 +81,8 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.Other:
                     default:
                         context.NeedsClonerClass = true;
-                        return $"{memberName} = Cloner<{member.TypeFullName}>.Clone({sourceVar}.{memberName}, {stateVar}){nf}";
+                        // The null-forgiving argument is safe: Cloner<T>.Clone null-guards its input.
+                        return $"{memberName} = Cloner<{member.TypeFullName}>.Clone({sourceVar}.{memberName}!, {stateVar}){nf}";
                 }
         }
     }
@@ -224,7 +225,8 @@ internal static class MemberCloneGenerator
                     case MemberTypeKind.Other:
                     default:
                         context.NeedsClonerClass = true;
-                        sb.AppendLine($"            {resultVar}.{memberName} = Cloner<{member.TypeFullName}>.Clone({sourceVar}.{memberName}, {stateVar}){nf};");
+                        // The null-forgiving argument is safe: Cloner<T>.Clone null-guards its input.
+                        sb.AppendLine($"            {resultVar}.{memberName} = Cloner<{member.TypeFullName}>.Clone({sourceVar}.{memberName}!, {stateVar}){nf};");
                         break;
                 }
 
