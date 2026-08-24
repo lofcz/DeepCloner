@@ -199,63 +199,54 @@ internal static class MemberCollector
     
     private static bool IsPopulatableCollectionType(ITypeSymbol type)
     {
-        switch (type)
-        {
-            case IArrayTypeSymbol:
-                return false;
-            case INamedTypeSymbol { IsGenericType: true } namedType:
-            {
-                string originalDef = namedType.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            
-                // List of populatable collection types (can use Clear + Add pattern)
-                string[] populatableTypes =
-                [
-                    "global::System.Collections.Generic.List<T>",
-                    "global::System.Collections.Generic.HashSet<T>",
-                    "global::System.Collections.Generic.LinkedList<T>",
-                    "global::System.Collections.Generic.Queue<T>",
-                    "global::System.Collections.Generic.Stack<T>",
-                    "global::System.Collections.Generic.SortedSet<T>",
-                    "global::System.Collections.ObjectModel.Collection<T>",
-                    "global::System.Collections.ObjectModel.ObservableCollection<T>",
-                    "global::System.Collections.Concurrent.ConcurrentBag<T>",
-                    "global::System.Collections.Concurrent.ConcurrentQueue<T>",
-                    "global::System.Collections.Concurrent.ConcurrentStack<T>",
-                    // Dictionaries
-                    "global::System.Collections.Generic.Dictionary<TKey, TValue>",
-                    "global::System.Collections.Generic.SortedDictionary<TKey, TValue>",
-                    "global::System.Collections.Generic.SortedList<TKey, TValue>",
-                    "global::System.Collections.Concurrent.ConcurrentDictionary<TKey, TValue>"
-                ];
-            
-                foreach (string populatable in populatableTypes)
-                {
-                    if (originalDef == populatable)
-                        return true;
-                }
+        // Getter-only collection members are cloned in place via Clear + Add / indexer writes.
+        // Verify that API surface on the type instead of consulting a whitelist, so BindingList<T>,
+        // collection subclasses and custom collections work as well (issue #50).
+        if (type is IArrayTypeSymbol)
+            return false;
 
-                break;
-            }
-        }
+        // A getter returns a copy of a struct: in-place population would only mutate the copy.
+        if (type.IsValueType)
+            return false;
 
-        // Also check if the type implements ICollection<T> and has Add method
-        // This covers custom collection types
-        foreach (INamedTypeSymbol? iface in type.AllInterfaces)
+        if (type.TypeKind == TypeKind.Interface)
         {
-            if (iface.IsGenericType)
+            // Mutable through the interface contract itself: ICollection<T> brings Clear + Add,
+            // IDictionary<K,V> brings Clear + a settable indexer. Read-only interfaces bring neither.
+            static bool IsMutableCollectionInterface(INamedTypeSymbol iface) =>
+                iface.OriginalDefinition.SpecialType == SpecialType.System_Collections_Generic_ICollection_T ||
+                (iface.MetadataName == "IDictionary`2" && iface.ContainingNamespace.ToDisplayString() == "System.Collections.Generic");
+
+            if (type is INamedTypeSymbol named && IsMutableCollectionInterface(named))
+                return true;
+
+            foreach (INamedTypeSymbol iface in type.AllInterfaces)
             {
-                string ifaceDef = iface.OriginalDefinition.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                if (ifaceDef == "global::System.Collections.Generic.ICollection<T>")
-                {
-                    // Has ICollection<T>, check if it's not read-only
-                    // ICollection<T>.IsReadOnly would need runtime check, so we just allow it
-                    // The generated code will handle runtime failures gracefully
+                if (IsMutableCollectionInterface(iface))
                     return true;
-                }
             }
+
+            return false;
         }
-        
-        return false;
+
+        bool isDictionary = TypeAnalyzer.IsDictionaryType(type);
+        if (!isDictionary && !TypeAnalyzer.IsCollectionType(type))
+            return false;
+
+        CollectionKind kind = TypeAnalyzer.GetCollectionKind(type);
+
+        // Read-only wrappers and immutable collections cannot be populated in place (the immutable
+        // types' public Add/Clear compile but return new instances, silently doing nothing).
+        if (kind is CollectionKind.ReadOnlyCollection or CollectionKind.ReadOnlyDictionary ||
+            kind.ToString().StartsWith("Immutable"))
+            return false;
+
+        if (!TypeAnalyzer.HasPublicInstanceMethod(type, "Clear", 0))
+            return false;
+
+        return isDictionary
+            ? TypeAnalyzer.HasPublicSettableIndexer(type)
+            : TypeAnalyzer.HasPublicInstanceMethod(type, TypeAnalyzer.GetAddMethodName(kind), 1);
     }
 
     /// <summary>

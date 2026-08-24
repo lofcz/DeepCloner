@@ -177,13 +177,10 @@ internal static class CollectionHelperGenerator
         else if (isStack) addMethod = "Push";
         else if (isLinkedList) addMethod = "AddLast";
 
-        // Determine if capacity can be passed to constructor.
-        // Only standard List, HashSet, Queue, Stack support new T(int capacity).
-        // For CollectionKind.List, the source must also have .Count (e.g. IEnumerable<T> does not).
-        bool supportsCapacity = (kind == CollectionKind.List && member.CollectionHasCount) || 
-                                kind == CollectionKind.HashSet || 
-                                kind == CollectionKind.Queue || 
-                                kind == CollectionKind.Stack;
+        // Capacity pre-allocation requires a VERIFIED .ctor(int capacity) on the concrete type
+        // (Collection<T>, BindingList<T> and many custom collections have none, issue #50)
+        // and a Count property on the source (e.g. IEnumerable<T> does not have one).
+        bool supportsCapacity = member.ConcreteHasCapacityCtor && member.CollectionHasCount;
 
         if (needsState)
         {
@@ -208,9 +205,11 @@ internal static class CollectionHelperGenerator
             sb.AppendLine();
         }
 
-        // Optimize: if element type is safe, use IEnumerable constructor directly (works for List, HashSet, etc.)
-        // Note: Queue/Stack/LinkedList also support IEnumerable ctor
-        if (isSafe && !needsState)
+        // Optimize: if element type is safe, use the copy constructor directly.
+        // Requires a ctor VERIFIED to copy (Collection<T>'s IList<T> ctor wraps the source instead)
+        // and is skipped for stacks: enumerating a stack yields top->bottom, so pushing that
+        // sequence into a new stack would reverse it.
+        if (isSafe && !needsState && member.ConcreteHasCopyCtor && !isStack)
         {
             sb.AppendLine($"            return new {concreteType}(source);");
         }
@@ -251,7 +250,9 @@ internal static class CollectionHelperGenerator
             }
             else if (kind == CollectionKind.List && member.CollectionHasIndexer)
             {
-                if (context.TargetFramework >= TargetFramework.Net5)
+                // CollectionsMarshal.SetCount/AsSpan only accept List<T>; other indexable
+                // collections in the List bucket (Collection<T>, BindingList<T>, ...) use indexed Add.
+                if (context.TargetFramework >= TargetFramework.Net5 && member.ConcreteIsList)
                 {
                     sb.AppendLine("            global::System.Runtime.InteropServices.CollectionsMarshal.SetCount(result, source.Count);");
                     sb.AppendLine("            var span = global::System.Runtime.InteropServices.CollectionsMarshal.AsSpan(result);");
@@ -477,7 +478,9 @@ internal static class CollectionHelperGenerator
 
         StringBuilder sb = context.Source;
         string concreteType = member.ConcreteTypeFullName ?? typeName;
-        bool supportsCapacity = kind is CollectionKind.Dictionary or CollectionKind.SortedList or CollectionKind.List or CollectionKind.None;
+        // Capacity pre-allocation requires a VERIFIED .ctor(int capacity) on the concrete type
+        // (a Dictionary<K,V> subclass doesn't inherit its base's constructors).
+        bool supportsCapacity = member.ConcreteHasCapacityCtor;
         bool isConcurrent = kind == CollectionKind.ConcurrentDictionary;
         bool keysAreSafe = member.KeyIsSafe;
         bool valuesAreSafe = member.ValueIsSafe;
@@ -495,7 +498,9 @@ internal static class CollectionHelperGenerator
             sb.AppendLine("            if (source == null) return null;");
         }
         
-        if (keysAreSafe && valuesAreSafe && !needsState && kind == CollectionKind.Dictionary)
+        // The copy-ctor fast path requires a ctor VERIFIED to copy (only the exact BCL Dictionary;
+        // subclasses don't inherit it and custom dictionary-taking ctors may wrap the source).
+        if (keysAreSafe && valuesAreSafe && !needsState && kind == CollectionKind.Dictionary && member.ConcreteHasCopyCtor)
         {
             sb.AppendLine($"            return new {concreteType}(source);");
             sb.AppendLine("        }");
