@@ -577,32 +577,19 @@ internal sealed class CloneCodeGenerator
             {
                 if (useState)
                 {
-                    List<string> requiredMembers = [];
-                    foreach (MemberModel member in derivedModel.Members)
-                    {
-                        if (member.IsRequired)
-                        {
-                            requiredMembers.Add($"                {member.Name} = default!");
-                        }
-                    }
-
-                    if (requiredMembers.Count > 0)
-                    {
-                        sb.AppendLine($"            var result = new {typeName}");
-                        sb.AppendLine("            {");
-                        sb.AppendLine(string.Join(",\n", requiredMembers));
-                        sb.AppendLine("            };");
-                    }
-                    else
-                    {
-                        sb.AppendLine($"            var result = new {typeName}();");
-                    }
+                    ClassCloneBodyGenerator.WriteNewWithObjectInitializer(
+                        sb,
+                        typeName,
+                        ClassCloneBodyGenerator.CollectObjectInitializerAssignments(_context, derivedModel.Members, "source", stateVarName));
 
                     sb.AppendLine($"            {stateVarName}?.AddKnownRef(source, result);");
                     sb.AppendLine();
 
                     foreach (MemberModel member in derivedModel.Members)
                     {
+                        if (ClassCloneBodyGenerator.MustAssignInObjectInitializer(member))
+                            continue;
+
                         MemberCloneGenerator.WriteMemberCloning(_context, member, "result", "source", stateVarName);
                     }
 

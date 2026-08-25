@@ -22,6 +22,58 @@ internal static class ClassCloneBodyGenerator
         return false;
     }
     
+    /// <summary>
+    /// Members that the C# compiler only allows to be assigned during construction
+    /// (public <c>init</c> accessors and <c>required</c> members). Post-construction
+    /// <c>result.X = ...</c> is a compile error for these, so every <c>new T()</c>
+    /// path must put them in the object initializer. The state-tracking path used
+    /// to skip them (ZeroCoolDade/FastClonerBug: init-only properties cloned as
+    /// collection elements via InternalFastDeepClone).
+    /// </summary>
+    public static bool MustAssignInObjectInitializer(MemberModel member)
+    {
+        if (member.IsWeaverState)
+            return false;
+        if (member.AccessorStrategy != NonPublicAccessorStrategy.None)
+            return false;
+        return member is { IsProperty: true, IsInitOnly: true } || member.IsRequired;
+    }
+
+    public static List<string> CollectObjectInitializerAssignments(
+        CloneGeneratorContext ctx,
+        IEnumerable<MemberModel> members,
+        string sourceVar,
+        string stateVar)
+    {
+        List<string> assignments = [];
+        foreach (MemberModel member in members)
+        {
+            if (!MustAssignInObjectInitializer(member))
+                continue;
+
+            string assignment = MemberCloneGenerator.GetMemberAssignment(ctx, member, sourceVar, stateVar, "                ");
+            if (!string.IsNullOrEmpty(assignment))
+                assignments.Add($"                {assignment}");
+        }
+
+        return assignments;
+    }
+
+    public static void WriteNewWithObjectInitializer(StringBuilder sb, string typeName, List<string> initializerAssignments)
+    {
+        if (initializerAssignments.Count > 0)
+        {
+            sb.AppendLine($"            var result = new {typeName}");
+            sb.AppendLine("            {");
+            sb.AppendLine(string.Join(",\n", initializerAssignments));
+            sb.AppendLine("            };");
+        }
+        else
+        {
+            sb.AppendLine($"            var result = new {typeName}();");
+        }
+    }
+
     public static void WriteClassCloneBody(
         CloneGeneratorContext ctx,
         string typeName,
@@ -33,133 +85,50 @@ internal static class ClassCloneBodyGenerator
         StringBuilder sb = ctx.Source;
         bool hasParameterlessConstructor = ctx.Model.HasParameterlessConstructor;
         bool isRecord = ctx.Model.IsRecord;
+        string stateVar = useState ? (stateVarName ?? "state") : "null";
         
         if (isRecord && !useState)
         {
             WriteRecordCloneBody(ctx, typeName, sourceVarName);
             return;
         }
-        
-        if (useState)
-        {
-            WriteInstanceCreation(ctx, sb, typeName, hasParameterlessConstructor, isRecord, sourceVarName);
 
-            string stateVarForAdd = stateVarName ?? "state";
-            string nullConditional = useNullConditional ? "?" : "";
-            sb.AppendLine($"            {stateVarForAdd}{nullConditional}.AddKnownRef({sourceVarName}, result);");
-            sb.AppendLine();
-
-            // Records are created through their copy constructor (`source with { }`); classes
-            // without a parameterless constructor are created via GetUninitializedObject, so no
-            // constructor ran and weaver state is missing (issue #48).
-            bool instanceCreatedWithoutConstructor = !isRecord && !hasParameterlessConstructor;
-            foreach (MemberModel member in ctx.Model.Members)
-            {
-                MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVarForAdd, instanceCreatedWithoutConstructor);
-            }
-            
-            sb.AppendLine();
-            sb.AppendLine("            return result;");
-        }
-        else
-        {
-            const string stateVar = "null";
-            
-            if (hasParameterlessConstructor)
-            {
-                sb.Append($"            var result = new {typeName}");
-                
-                List<string> initOnlyMembers = [];
-                foreach (MemberModel member in ctx.Model.Members)
-                {
-                    bool participatesInInitializer =
-                        (member is { IsProperty: true, IsInitOnly: true } || member.IsRequired);
-                    if (!participatesInInitializer)
-                        continue;
-
-                    if (member.AccessorStrategy != NonPublicAccessorStrategy.None)
-                        continue;
-
-                    string assignment = MemberCloneGenerator.GetMemberAssignment(ctx, member, sourceVarName, stateVar, "                ");
-                    if (!string.IsNullOrEmpty(assignment))
-                    {
-                        initOnlyMembers.Add($"                {assignment}");
-                    }
-                }
-
-                if (initOnlyMembers.Count > 0)
-                {
-                    sb.AppendLine();
-                    sb.AppendLine("            {");
-                    sb.AppendLine(string.Join(",\n", initOnlyMembers));
-                    sb.AppendLine("            };");
-                }
-                else
-                {
-                    sb.AppendLine("();");
-                }
-                
-                foreach (MemberModel member in ctx.Model.Members)
-                {
-                    bool participatedInInitializer =
-                        (member is { IsProperty: true, IsInitOnly: true } || member.IsRequired)
-                        && member.AccessorStrategy == NonPublicAccessorStrategy.None;
-                    if (participatedInInitializer)
-                        continue;
-                    
-                    MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar);
-                }
-            }
-            else
-            {
-                WriteInstanceCreation(ctx, sb, typeName, hasParameterlessConstructor, isRecord, sourceVarName);
-
-                // GetUninitializedObject: no constructor ran (issue #48 — populate without
-                // invoking property setters and share weaver state).
-                foreach (MemberModel member in ctx.Model.Members)
-                {
-                    MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar, instanceCreatedWithoutConstructor: true);
-                }
-            }
-            
-            sb.AppendLine();
-            sb.AppendLine("            return result;");
-        }
-    }
-    
-    private static void WriteInstanceCreation(CloneGeneratorContext ctx, StringBuilder sb, string typeName, bool hasParameterlessConstructor, bool isRecord, string sourceVarName = "source")
-    {
         if (isRecord)
         {
-            sb.AppendLine($"            var result = {sourceVarName} with {{ }};");
+            WriteRecordCloneBodyWithState(ctx, sourceVarName, stateVar, useNullConditional);
+            return;
         }
-        else if (hasParameterlessConstructor)
-        {
-            List<string> requiredMembers = [];
-            foreach (MemberModel member in ctx.Model.Members)
-            {
-                if (member.IsRequired)
-                {
-                    requiredMembers.Add($"                {member.Name} = default!");
-                }
-            }
 
-            if (requiredMembers.Count > 0)
-            {
-                sb.AppendLine($"            var result = new {typeName}");
-                sb.AppendLine("            {");
-                sb.AppendLine(string.Join(",\n", requiredMembers));
-                sb.AppendLine("            };");
-            }
-            else
-            {
-                sb.AppendLine($"            var result = new {typeName}();");
-            }
+        bool instanceCreatedWithoutConstructor = !hasParameterlessConstructor;
+
+        if (hasParameterlessConstructor)
+        {
+            // Init/required members cannot be assigned after construction, regardless of
+            // whether this body also tracks circular references.
+            WriteNewWithObjectInitializer(sb, typeName, CollectObjectInitializerAssignments(ctx, ctx.Model.Members, sourceVarName, stateVar));
         }
         else
         {
             WriteGetUninitializedObject(sb, typeName);
         }
+
+        if (useState)
+        {
+            string nullConditional = useNullConditional ? "?" : "";
+            sb.AppendLine($"            {stateVar}{nullConditional}.AddKnownRef({sourceVarName}, result);");
+            sb.AppendLine();
+        }
+
+        foreach (MemberModel member in ctx.Model.Members)
+        {
+            if (hasParameterlessConstructor && MustAssignInObjectInitializer(member))
+                continue;
+
+            MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar, instanceCreatedWithoutConstructor);
+        }
+            
+        sb.AppendLine();
+        sb.AppendLine("            return result;");
     }
     
     internal static void WriteGetUninitializedObject(StringBuilder sb, string typeName)
@@ -234,6 +203,48 @@ internal static class ClassCloneBodyGenerator
             sb.AppendLine(string.Join(",\n", deepCloneAssignments));
             sb.AppendLine("            };");
         }
+    }
+
+    /// <summary>
+    /// State-tracking record clone: construction-only members (init/required) go in
+    /// <c>with {{ }}</c> because they cannot be assigned afterwards; settable members
+    /// are written after the instance is registered so cycles through them resolve.
+    /// </summary>
+    private static void WriteRecordCloneBodyWithState(
+        CloneGeneratorContext ctx,
+        string sourceVarName,
+        string stateVar,
+        bool useNullConditional)
+    {
+        StringBuilder sb = ctx.Source;
+        List<string> constructionAssignments = CollectObjectInitializerAssignments(ctx, ctx.Model.Members, sourceVarName, stateVar);
+
+        if (constructionAssignments.Count > 0)
+        {
+            sb.AppendLine($"            var result = {sourceVarName} with");
+            sb.AppendLine("            {");
+            sb.AppendLine(string.Join(",\n", constructionAssignments));
+            sb.AppendLine("            };");
+        }
+        else
+        {
+            sb.AppendLine($"            var result = {sourceVarName} with {{ }};");
+        }
+
+        string nullConditional = useNullConditional ? "?" : "";
+        sb.AppendLine($"            {stateVar}{nullConditional}.AddKnownRef({sourceVarName}, result);");
+        sb.AppendLine();
+
+        foreach (MemberModel member in ctx.Model.Members)
+        {
+            if (MustAssignInObjectInitializer(member))
+                continue;
+
+            MemberCloneGenerator.WriteMemberCloning(ctx, member, "result", sourceVarName, stateVar);
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("            return result;");
     }
 }
 
