@@ -214,7 +214,8 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
                             .Replace(">", "_")
                             .Replace(" ", "")
                             .Replace(",", "_")
-                            .Replace(":", "_");
+                            .Replace(":", "_")
+                            .Replace("?", "_");
 
                         ctx.AddSource($"{safeName}_FastDeepClone.g.cs", SourceText.From(generatedSource, Encoding.UTF8));
                     }
@@ -284,7 +285,8 @@ public class FastClonerIncrementalGenerator : IIncrementalGenerator
                             .Replace(">", "_")
                             .Replace(" ", "")
                             .Replace(",", "_")
-                            .Replace(":", "_");
+                            .Replace(":", "_")
+                            .Replace("?", "_");
 
                         ctx.AddSource($"{safeName}_FastClonerContext.g.cs", SourceText.From(source, Encoding.UTF8));
                     }

@@ -31,7 +31,7 @@ internal static class GenericTypeAnalyzer
         NestedTypeCollector.Collect(typeArg, compilation, nullability, nestedTypes);
         
         MemberModel? collectionModel = null;
-        string typeArgFQN = typeArg.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+        string typeArgFQN = TypeAnalyzer.GetTypeNameForSignature(typeArg);
         if (nestedTypes.TryGetValue(typeArgFQN, out MemberModel model))
         {
             collectionModel = model;
@@ -39,8 +39,8 @@ internal static class GenericTypeAnalyzer
 
         // Analyze for implicit types (POCOs without attribute)
         Dictionary<string, TypeModel> implicitTypes = new Dictionary<string, TypeModel>();
-        Dictionary<ITypeSymbol, TypeModel?> implicitCache = new Dictionary<ITypeSymbol, TypeModel?>(SymbolEqualityComparer.Default);
-        HashSet<ITypeSymbol> processingStack = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+        Dictionary<ITypeSymbol, TypeModel?> implicitCache = TypeAnalyzer.CreateNullabilityAwareMap<TypeModel?>();
+        HashSet<ITypeSymbol> processingStack = TypeAnalyzer.CreateNullabilityAwareSet();
 
         void CollectImplicitRecursively(ITypeSymbol t)
         {

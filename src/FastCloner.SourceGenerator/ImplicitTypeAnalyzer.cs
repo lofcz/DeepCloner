@@ -18,10 +18,12 @@ internal static class ImplicitTypeAnalyzer
     {
         implicitModel = null;
 
-        if (processingStack.Contains(type))
+        ITypeSymbol cacheKey = TypeAnalyzer.ToNullabilityCacheKey(type);
+
+        if (processingStack.Contains(cacheKey))
             return true;
 
-        if (cache.TryGetValue(type, out TypeModel? cached))
+        if (cache.TryGetValue(cacheKey, out TypeModel? cached))
         {
             implicitModel = cached;
             return cached != null;
@@ -33,7 +35,7 @@ internal static class ImplicitTypeAnalyzer
         if (type is not INamedTypeSymbol namedType)
             return false;
 
-        processingStack.Add(type);
+        processingStack.Add(cacheKey);
 
         List<MemberAnalysis> memberAnalyses = MemberCollector.GetMembers(namedType, compilation, nullabilityEnabled, externalIgnores);
         List<MemberModel> finalImplicitMembers = [];
@@ -76,7 +78,7 @@ internal static class ImplicitTypeAnalyzer
                     {
                         if (compModel != null) childRelatedTypes.Add(compModel);
                         
-                        string typeName = componentType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                        string typeName = TypeAnalyzer.GetTypeNameForSignature(componentType);
                         componentMember = new MemberModel(
                             Name: "Implicit_" + componentType.Name, 
                             TypeFullName: typeName,
@@ -163,7 +165,7 @@ internal static class ImplicitTypeAnalyzer
             finalImplicitMembers.Add(m);
         }
         
-        processingStack.Remove(type);
+        processingStack.Remove(cacheKey);
         
         if (success)
         {
@@ -186,7 +188,7 @@ internal static class ImplicitTypeAnalyzer
             implicitModel = new TypeModel(
                 TypeAnalyzer.GetNamespace(namedType),
                 namedType.Name,
-                namedType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                TypeAnalyzer.GetTypeNameForSignature(namedType),
                 flags.IsStruct,
                 flags.IsSealed,
                 namedType.IsAbstract,
@@ -209,7 +211,7 @@ internal static class ImplicitTypeAnalyzer
                 CodeAnalysisAvailable: compilation.GetTypeByMetadataName("System.Diagnostics.CodeAnalysis.NotNullIfNotNullAttribute") != null,
                 TargetFramework: targetFramework);
                 
-            cache[type] = implicitModel;
+            cache[cacheKey] = implicitModel;
             return true;
         }
         

@@ -43,8 +43,8 @@ internal static class TypeModelFactory
 
         List<MemberAnalysis> memberAnalyses = MemberCollector.GetMembers(symbol, compilation, nullabilityEnabled, externalIgnores);
         Dictionary<string, TypeModel> relatedTypes = new Dictionary<string, TypeModel>(); // Use FQN as key to avoid dupes
-        Dictionary<ITypeSymbol, TypeModel?> implicitCache = new Dictionary<ITypeSymbol, TypeModel?>(SymbolEqualityComparer.Default);
-        HashSet<ITypeSymbol> processingStack = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+        Dictionary<ITypeSymbol, TypeModel?> implicitCache = TypeAnalyzer.CreateNullabilityAwareMap<TypeModel?>();
+        HashSet<ITypeSymbol> processingStack = TypeAnalyzer.CreateNullabilityAwareSet();
         List<MemberModel> finalMembers = [];
         Dictionary<string, MemberModel> nestedTypes = new Dictionary<string, MemberModel>();
         
@@ -246,7 +246,7 @@ internal static class TypeModelFactory
         model = new TypeModel(
             TypeAnalyzer.GetNamespace(symbol),
             symbol.Name,
-            symbol.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+            TypeAnalyzer.GetTypeNameForSignature(symbol),
             flags.IsStruct,
             flags.IsSealed,
             symbol.IsAbstract,

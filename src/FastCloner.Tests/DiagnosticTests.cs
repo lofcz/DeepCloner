@@ -395,6 +395,169 @@ public static class CloningVat
             $"Found: {string.Join("; ", nullableWarnings.Select(d => $"{d.Id}: {d.GetMessage()}"))}");
     }
 
+    [Test]
+    [Arguments("DictionaryValue", """
+        public Dictionary<string, Payload?>? Map { get; set; }
+        """)]
+    [Arguments("ListElement", """
+        public List<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("ArrayElement", """
+        public Payload?[]? Items { get; set; }
+        """)]
+    [Arguments("JaggedArray", """
+        public Payload?[][]? Items { get; set; }
+        """)]
+    [Arguments("NullableKey", """
+        public Dictionary<string?, Payload>? Map { get; set; }
+        """)]
+    [Arguments("NestedGeneric", """
+        public Dictionary<string, List<Payload?>>? Map { get; set; }
+        """)]
+    [Arguments("ReadOnlyDictionary", """
+        public IReadOnlyDictionary<string, Payload?>? Map { get; set; }
+        """)]
+    [Arguments("ReadOnlyList", """
+        public IReadOnlyList<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("CustomGeneric", """
+        public Wrapper<Payload?>? Item { get; set; }
+        """)]
+    [Arguments("BothNullabilityVariants", """
+        public Wrapper<Payload>? NonNullArg { get; set; }
+        public Wrapper<Payload?>? NullableArg { get; set; }
+        """)]
+    [Arguments("NullableStringList", """
+        public List<string?>? Items { get; set; }
+        """)]
+    [Arguments("TrustNullabilityDoesNotRegress", """
+        [FastClonerClonable]
+        [FastClonerTrustNullability]
+        public sealed class TrustContainer
+        {
+            public Dictionary<string, Payload?>? Map { get; set; }
+        }
+        """)]
+    [Arguments("ValueTypeNullableStillWorks", """
+        public Dictionary<string, PayloadStruct?>? Map { get; set; }
+        """)]
+    [Arguments("HashSet", """
+        public HashSet<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("Queue", """
+        public Queue<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("Stack", """
+        public Stack<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("LinkedList", """
+        public LinkedList<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("IEnumerable", """
+        public IEnumerable<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("IList", """
+        public IList<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("ISet", """
+        public ISet<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("ICollection", """
+        public ICollection<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("ObservableCollection", """
+        public ObservableCollection<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("HashSetOfNullableString", """
+        public HashSet<string?>? Items { get; set; }
+        """)]
+    [Arguments("NestedList", """
+        public List<List<Payload?>>? Items { get; set; }
+        """)]
+    [Arguments("NestedWrapperList", """
+        public Wrapper<List<Payload?>>? Item { get; set; }
+        """)]
+    [Arguments("MultiDimArray", """
+        public Payload?[,]? Items { get; set; }
+        """)]
+    [Arguments("DictionaryOfArrays", """
+        public Dictionary<string, Payload?[]>? Map { get; set; }
+        """)]
+    [Arguments("SortedDictionary", """
+        public SortedDictionary<string, Payload?>? Map { get; set; }
+        """)]
+    [Arguments("ConcurrentDictionary", """
+        public ConcurrentDictionary<string, Payload?>? Map { get; set; }
+        """)]
+    [Arguments("ImmutableList", """
+        public ImmutableList<Payload?>? Items { get; set; }
+        """)]
+    [Arguments("FieldMember", """
+        public Dictionary<string, Payload?>? Map;
+        """)]
+    public async Task Issue54_GeneratedCode_ForNullableGenericTypeArguments_ShouldCompile(string scenario, string members)
+    {
+        // https://github.com/lofcz/FastCloner/issues/54
+        // Helpers must keep NRT annotations on generic arguments / array elements,
+        // not only the outer '?' on the collection itself.
+        bool isStandaloneType = members.Contains("[FastClonerClonable]", StringComparison.Ordinal)
+            || members.Contains("public sealed class", StringComparison.Ordinal);
+
+        string containerDecl = isStandaloneType
+            ? members
+            : "[FastClonerClonable]\npublic sealed class Container\n{\n" + members + "\n}\n";
+
+        string source =
+            "#nullable enable\n" +
+            "using FastCloner.SourceGenerator.Shared;\n" +
+            "using System.Collections.Concurrent;\n" +
+            "using System.Collections.Generic;\n" +
+            "using System.Collections.Immutable;\n" +
+            "using System.Collections.ObjectModel;\n\n" +
+            "namespace TestNamespace;\n\n" +
+            "public record Payload(string Text);\n" +
+            "public record struct PayloadStruct(string Text);\n\n" +
+            "public class Wrapper<T>\n" +
+            "{\n" +
+            "    public T Value { get; set; } = default!;\n" +
+            "}\n\n" +
+            containerDecl;
+
+        (ImmutableArray<Diagnostic> _, ImmutableArray<Diagnostic> compilationDiags) = RunGeneratorAndCompile(source);
+
+        List<Diagnostic> nrtErrors = compilationDiags
+            .Where(d => d.Id is "CS8620" or "CS8619")
+            .ToList();
+
+        await Assert.That(nrtErrors).IsEmpty().Because(
+            $"Scenario '{scenario}': generated clone helpers must preserve nullable annotations on generic type arguments. " +
+            $"Found: {string.Join("; ", nrtErrors.Select(d => $"{d.Id}: {d.GetMessage()}"))}");
+    }
+
+    [Test]
+    public async Task Issue54_GeneratedHelper_Should_Emit_NullableGenericTypeArgument()
+    {
+        string source = @"
+#nullable enable
+using FastCloner.SourceGenerator.Shared;
+using System.Collections.Generic;
+
+namespace TestNamespace;
+
+public record Payload(string Text);
+
+[FastClonerClonable]
+public sealed class Container
+{
+    public Dictionary<string, Payload?>? Map { get; set; }
+}
+";
+        List<(string HintName, string Text)> generated = RunGeneratorAndGetSourcesNullable(source);
+        string combined = string.Join("\n", generated.Select(g => g.Text));
+
+        await Assert.That(combined).Contains("Dictionary<string, global::TestNamespace.Payload?>");
+    }
+
     #region Polymorphic attribute validation
 
     [Test]
@@ -602,6 +765,8 @@ public class PolySub : PolyRoot
             MetadataReference.CreateFromFile(typeof(FastCloner).Assembly.Location),
             MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("System.Runtime").Location),
             MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("System.Collections").Location),
+            MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("System.Collections.Concurrent").Location),
+            MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("System.Collections.Immutable").Location),
             MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("System.ObjectModel").Location),
             MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("netstandard").Location)
         ];
@@ -620,6 +785,44 @@ public class PolySub : PolyRoot
 
         ImmutableArray<Diagnostic> compilationDiags = outputCompilation.GetDiagnostics();
         return (generatorDiags, compilationDiags);
+    }
+
+    /// <summary>
+    /// Like <see cref="RunGeneratorAndGetSources"/> but with NRT enabled and collection references,
+    /// so generated helpers for generic collections can be inspected.
+    /// </summary>
+    private static List<(string HintName, string Text)> RunGeneratorAndGetSourcesNullable(string source)
+    {
+        SyntaxTree syntaxTree = CSharpSyntaxTree.ParseText(source);
+
+        List<MetadataReference> references =
+        [
+            MetadataReference.CreateFromFile(typeof(object).Assembly.Location),
+            MetadataReference.CreateFromFile(typeof(FastClonerClonableAttribute).Assembly.Location),
+            MetadataReference.CreateFromFile(typeof(FastCloner).Assembly.Location),
+            MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("System.Runtime").Location),
+            MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("System.Collections").Location),
+            MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("System.ObjectModel").Location),
+            MetadataReference.CreateFromFile(System.Reflection.Assembly.Load("netstandard").Location)
+        ];
+
+        CSharpCompilation compilation = CSharpCompilation.Create(
+            "TestAssembly",
+            [syntaxTree],
+            references,
+            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary,
+                nullableContextOptions: NullableContextOptions.Enable));
+
+        FastClonerIncrementalGenerator generator = new FastClonerIncrementalGenerator();
+        GeneratorDriver driver = CSharpGeneratorDriver.Create(generator);
+
+        driver = driver.RunGenerators(compilation);
+        GeneratorDriverRunResult result = driver.GetRunResult();
+
+        return result.Results
+            .SelectMany(r => r.GeneratedSources)
+            .Select(g => (g.HintName, g.SourceText.ToString()))
+            .ToList();
     }
 
     /// <summary>

@@ -349,24 +349,51 @@ internal static class TypeAnalyzer
     }
 
     /// <summary>
-    /// Gets a type name for use in method signatures, without nullable annotations.
-    /// Uses global:: prefix to avoid namespace conflicts.
+    /// Fully-qualified display format that keeps nullable-reference-type annotations
+    /// on generic type arguments and array elements (issue #54).
+    /// </summary>
+    internal static readonly SymbolDisplayFormat FullyQualifiedNullableFormat =
+        SymbolDisplayFormat.FullyQualifiedFormat.WithMiscellaneousOptions(
+            SymbolDisplayFormat.FullyQualifiedFormat.MiscellaneousOptions
+            | SymbolDisplayMiscellaneousOptions.IncludeNullableReferenceTypeModifier);
+
+    /// <summary>
+    /// Type name for generated signatures and lookup keys.
+    /// Preserves NRT annotations on generic type arguments / array elements, but strips
+    /// the outer annotation so helpers can add '?' for reference types themselves.
     /// </summary>
     public static string GetTypeNameForSignature(ITypeSymbol type)
     {
-        // Strip nullable annotation to get the underlying type
-        ITypeSymbol nonNullableType = type.WithNullableAnnotation(NullableAnnotation.None);
-        
-        // Use a format with global:: prefix to avoid namespace conflicts
-        SymbolDisplayFormat format = new SymbolDisplayFormat(
-            globalNamespaceStyle: SymbolDisplayGlobalNamespaceStyle.Included,
-            typeQualificationStyle: SymbolDisplayTypeQualificationStyle.NameAndContainingTypesAndNamespaces,
-            genericsOptions: SymbolDisplayGenericsOptions.IncludeTypeParameters,
-            memberOptions: SymbolDisplayMemberOptions.IncludeType,
-            parameterOptions: SymbolDisplayParameterOptions.IncludeType,
-            miscellaneousOptions: SymbolDisplayMiscellaneousOptions.None);
-        
-        return nonNullableType.ToDisplayString(format);
+        return type.WithNullableAnnotation(NullableAnnotation.None).ToDisplayString(FullyQualifiedNullableFormat);
+    }
+
+    /// <summary>
+    /// Type name including the type's own NRT annotation. Use for generic type arguments,
+    /// collection elements, and dictionary keys/values emitted into generated source.
+    /// </summary>
+    public static string GetTypeNameForUsage(ITypeSymbol type)
+    {
+        return type.ToDisplayString(FullyQualifiedNullableFormat);
+    }
+
+    /// <summary>
+    /// Cache key that keeps generic-argument nullability but ignores the outer NRT
+    /// annotation, so <c>Payload</c> and <c>Payload?</c> share a model while
+    /// <c>Wrapper&lt;Payload&gt;</c> and <c>Wrapper&lt;Payload?&gt;</c> do not.
+    /// </summary>
+    public static ITypeSymbol ToNullabilityCacheKey(ITypeSymbol type)
+    {
+        return type.WithNullableAnnotation(NullableAnnotation.None);
+    }
+
+    public static Dictionary<ITypeSymbol, T> CreateNullabilityAwareMap<T>()
+    {
+        return new Dictionary<ITypeSymbol, T>(SymbolEqualityComparer.IncludeNullability);
+    }
+
+    public static HashSet<ITypeSymbol> CreateNullabilityAwareSet()
+    {
+        return new HashSet<ITypeSymbol>(SymbolEqualityComparer.IncludeNullability);
     }
 
     /// <summary>
@@ -446,7 +473,7 @@ internal static class TypeAnalyzer
             
             foreach (ITypeSymbol? constraintType in tp.ConstraintTypes)
             {
-                constraintParts.Add(constraintType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+                constraintParts.Add(GetTypeNameForUsage(constraintType));
             }
             
             if (tp.HasConstructorConstraint)
@@ -837,7 +864,7 @@ internal static class TypeAnalyzer
         // If it's a concrete type (class/struct) and not abstract, use it directly
         if ((type.TypeKind == TypeKind.Class || type.TypeKind == TypeKind.Struct) && !type.IsAbstract)
         {
-            return type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            return GetTypeNameForSignature(type);
         }
 
         // Map interfaces/abstract types to standard concrete implementations
