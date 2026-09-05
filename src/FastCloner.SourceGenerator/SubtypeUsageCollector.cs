@@ -58,7 +58,7 @@ internal static class SubtypeUsageCollector
         foreach (INamedTypeSymbol chainRoot in FindAllDispatchRoots(symbol))
         {
             usages.Add(new ClosedSubtypeUsage(
-                chainRoot.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                TypeAnalyzer.GetTypeNameForSignature(chainRoot),
                 model));
         }
 

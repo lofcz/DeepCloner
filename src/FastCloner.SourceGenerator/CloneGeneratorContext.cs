@@ -55,15 +55,12 @@ internal sealed class CloneGeneratorContext
 
         foreach (TypeModel? related in model.RelatedTypes)
         {
-            _implicitTypeModels[related.FullyQualifiedName] = related;
+            IndexTypeName(_implicitTypeModels, related.FullyQualifiedName, related, related.IsStruct);
         }
         
         foreach (MemberModel nested in model.NestedTypes)
         {
-            if (!_typeNameToMemberModel.ContainsKey(nested.TypeFullName))
-            {
-                _typeNameToMemberModel[nested.TypeFullName] = nested;
-            }
+            IndexTypeName(_typeNameToMemberModel, nested.TypeFullName, nested, nested.IsValueType);
         }
     }
 
@@ -102,10 +99,7 @@ internal sealed class CloneGeneratorContext
 
     public void RegisterImplicitType(TypeModel model)
     {
-        if (!_implicitTypeModels.ContainsKey(model.FullyQualifiedName))
-        {
-            _implicitTypeModels[model.FullyQualifiedName] = model;
-        }
+        IndexTypeName(_implicitTypeModels, model.FullyQualifiedName, model, model.IsStruct);
     }
     
     public void RegisterExternalMethod(string typeFullName, string methodName)
@@ -121,7 +115,8 @@ internal sealed class CloneGeneratorContext
         }
         
         string methodName = $"FastClonerSgClone{GetCleanTypeName(typeFullName)}";
-        _typeNameToMethodName[typeFullName] = methodName;
+        bool isValueType = _implicitTypeModels.TryGetValue(typeFullName, out TypeModel implicitModel) && implicitModel.IsStruct;
+        IndexTypeName(_typeNameToMethodName, typeFullName, methodName, isValueType);
 
         if (_neededHelperMethods.Add(typeFullName))
         {
@@ -141,19 +136,33 @@ internal sealed class CloneGeneratorContext
         }
         
         string methodName = $"FastClonerSgClone{GetCleanTypeName(member.TypeFullName)}";
-        _typeNameToMethodName[typeKey] = methodName;
+        IndexTypeName(_typeNameToMethodName, typeKey, methodName, member.IsValueType);
 
         if (_neededHelperMethods.Add(typeKey))
         {
             _pendingHelperMethods.Enqueue(typeKey);
         }
         
-        if (!_typeNameToMemberModel.ContainsKey(typeKey))
-        {
-            _typeNameToMemberModel[typeKey] = member;
-        }
+        IndexTypeName(_typeNameToMemberModel, typeKey, member, member.IsValueType);
 
         return methodName;
+    }
+
+    /// <summary>
+    /// Element/key/value type names include the usage-site NRT suffix (<c>Payload?</c>),
+    /// while helper keys are the underlying type (<c>Payload</c>). Index both so lookups match.
+    /// </summary>
+    private static void IndexTypeName<T>(Dictionary<string, T> map, string typeFullName, T value, bool isValueType)
+    {
+        if (!map.ContainsKey(typeFullName))
+            map[typeFullName] = value;
+
+        if (!isValueType && typeFullName.Length > 0 && typeFullName[typeFullName.Length - 1] != '?')
+        {
+            string annotated = typeFullName + "?";
+            if (!map.ContainsKey(annotated))
+                map[annotated] = value;
+        }
     }
     
     private static string GetCleanTypeName(string typeName)

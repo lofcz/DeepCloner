@@ -173,7 +173,7 @@ internal readonly record struct MemberModel(
 
         return new MemberModel(
             property.Name,
-            property.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+            TypeAnalyzer.GetTypeNameForSignature(property.Type),
             property.SetMethod == null || property.IsReadOnly,
             true,
             false,
@@ -244,7 +244,7 @@ internal readonly record struct MemberModel(
 
         return new MemberModel(
             field.Name,
-            field.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+            TypeAnalyzer.GetTypeNameForSignature(field.Type),
             field.IsReadOnly,
             false,
             true,
@@ -410,7 +410,7 @@ internal readonly record struct MemberModel(
         // IMPORTANT: Check array BEFORE collection (arrays implement ICollection<T>)
         if (type is IArrayTypeSymbol arrayType)
         {
-            string elemName = arrayType.ElementType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            string elemName = TypeAnalyzer.GetTypeNameForUsage(arrayType.ElementType);
             bool elemSafe = TypeAnalyzer.IsSafeType(arrayType.ElementType, compilation);
             bool elemClon = TypeAnalyzer.HasClonableAttribute(arrayType.ElementType);
             int rank = arrayType.Rank;
@@ -443,8 +443,8 @@ internal readonly record struct MemberModel(
                 if (!TypeAnalyzer.CanGenerateDictionaryHelper(type, collKind, caps))
                     return (MemberTypeKind.Other, null, null, null, false, false, false, false, false, false, true, CollectionKind.None, null, 0, true, true, null, null, false, false, false);
 
-                string keyName = dictTypes.Value.KeyType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                string valName = dictTypes.Value.ValueType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                string keyName = TypeAnalyzer.GetTypeNameForUsage(dictTypes.Value.KeyType);
+                string valName = TypeAnalyzer.GetTypeNameForUsage(dictTypes.Value.ValueType);
                 
                 bool keySafe = TypeAnalyzer.IsSafeType(dictTypes.Value.KeyType, compilation);
                 bool keyClon = TypeAnalyzer.HasClonableAttribute(dictTypes.Value.KeyType);
@@ -464,7 +464,7 @@ internal readonly record struct MemberModel(
         if (TypeAnalyzer.IsCollectionType(type))
         {
             ITypeSymbol? elemType = TypeAnalyzer.GetCollectionElementType(type, compilation);
-            string? elemName = elemType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            string? elemName = elemType is null ? null : TypeAnalyzer.GetTypeNameForUsage(elemType);
             bool elemSafe = elemType != null && TypeAnalyzer.IsSafeType(elemType, compilation);
             bool elemClon = elemType != null && TypeAnalyzer.HasClonableAttribute(elemType);
             // If element is not safe and not clonable, we need FastCloner

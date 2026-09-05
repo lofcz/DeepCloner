@@ -35,13 +35,12 @@ internal static class BridgeContractCollector
 
             string returnTypeFqn = method.ReturnsVoid
                 ? "void"
-                : method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                : TypeAnalyzer.GetTypeNameForUsage(method.ReturnType);
 
             string[] paramFqns = new string[method.Parameters.Length];
             for (int i = 0; i < method.Parameters.Length; i++)
             {
-                paramFqns[i] = method.Parameters[i].Type
-                    .ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                paramFqns[i] = TypeAnalyzer.GetTypeNameForUsage(method.Parameters[i].Type);
             }
 
             methods.Add(new BridgeMethodSpec(

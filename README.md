@@ -17,14 +17,14 @@ FastCloner is a zero-dependency deep cloning library for .NET, from <code>.NET 4
 ## ✨ Features
 
 - **The Fastest** - [Benchmarked](https://github.com/lofcz/FastCloner?tab=readme-ov-file#performance) to beat all other libraries with [third-party](https://github.com/FoundatioFx/Foundatio/pull/469#issuecomment-4013424812) [independent](https://github.com/AnderssonPeter/Dolly?tab=readme-ov-file#benchmarks) [benchmarks](https://github.com/arika0093/IDeepCloneable?tab=readme-ov-file#performance) verifying the performance. **300x** speed-up vs `Newtonsoft.Json` and **160x** vs `System.Text.Json`
-- **The Most Correct** - Built for the cases clone libraries get wrong: polymorphism, circular/shared references, readonly and immutable members, deep graphs, delegates, events, collections... Backed by [800+ tests](https://github.com/lofcz/FastCloner/tree/next/FastCloner.Tests), with documented [limitations](https://github.com/lofcz/FastCloner?tab=readme-ov-file#limitations)
+- **The Most Correct** - Built for the cases clone libraries get wrong: polymorphism, circular/shared references, readonly and immutable members, deep graphs, delegates, events, collections... Backed by [1,000+ tests](https://github.com/lofcz/FastCloner/tree/next/FastCloner.Tests), with documented [limitations](https://github.com/lofcz/FastCloner?tab=readme-ov-file#limitations)
 - **Hybrid AOT** - Uses generated clone code wherever possible, with targeted fallback to the runtime engine only where safety or correctness requires it
 - **Automatic type discovery** - The generator follows usages of generic and abstract types and emits concrete clone paths automatically
 - **Embeddable** - No dependencies outside the standard library. Source generator and reflection parts can be installed independently
 - **Precise control** - Override clone behavior per type or member with `Clone`, `Reference`, `Shallow`, or `Ignore`, at compile time or runtime
 - **Selective tracking** - FastCloner avoids identity and cycle-tracking overhead by default, but enables it when graph shape or `[FastClonerPreserveIdentity]` requires it
 - **Easy Integration** - `FastDeepClone()` for AOT cloning, `DeepClone()` for reflection cloning. FastCloner respects standard .NET attributes like `[NonSerialized]`, so you can adopt it without depending on library-specific annotations
-- **Production Ready** - Used by projects like [Foundatio](https://github.com/FoundatioFx/Foundatio), [Jobbr](https://jobbr.readthedocs.io/en/latest), [TarkovSP](https://sp-tarkov.com), [SnapX](https://github.com/SnapXL/SnapX), and [WinPaletter](https://github.com/Abdelrhman-AK/WinPaletter), with over [500K downloads on NuGet](https://www.nuget.org/packages/fastCloner#usedby-body-tab)
+- **Production Ready** - Used by projects like [Foundatio](https://github.com/FoundatioFx/Foundatio), [Jobbr](https://jobbr.readthedocs.io/en/latest), [TarkovSP](https://sp-tarkov.com), [SnapX](https://github.com/SnapXL/SnapX), and [WinPaletter](https://github.com/Abdelrhman-AK/WinPaletter), with over [1M downloads on NuGet](https://www.nuget.org/packages/fastCloner#usedby-body-tab)
 ## Getting Started
 
 Install the package via NuGet:

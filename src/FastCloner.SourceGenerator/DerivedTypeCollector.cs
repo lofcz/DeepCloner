@@ -138,7 +138,7 @@ internal static class DerivedTypeCollector
         return new TypeModel(
             TypeAnalyzer.GetNamespace(type),
             type.Name,
-            type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+            TypeAnalyzer.GetTypeNameForSignature(type),
             flags.IsStruct,
             flags.IsSealed,
             type.IsAbstract,
@@ -174,8 +174,8 @@ internal static class DerivedTypeCollector
         List<MemberAnalysis> memberAnalyses = MemberCollector.GetMembers(derivedType, compilation, nullabilityEnabled, externalIgnores);
         
         Dictionary<string, TypeModel> relatedTypes = new Dictionary<string, TypeModel>();
-        Dictionary<ITypeSymbol, TypeModel?> implicitCache = new Dictionary<ITypeSymbol, TypeModel?>(SymbolEqualityComparer.Default);
-        HashSet<ITypeSymbol> processingStack = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+        Dictionary<ITypeSymbol, TypeModel?> implicitCache = TypeAnalyzer.CreateNullabilityAwareMap<TypeModel?>();
+        HashSet<ITypeSymbol> processingStack = TypeAnalyzer.CreateNullabilityAwareSet();
         
         List<MemberModel> finalMembers = [];
         Dictionary<string, MemberModel> nestedTypes = new Dictionary<string, MemberModel>();
@@ -330,7 +330,7 @@ internal static class DerivedTypeCollector
         return new TypeModel(
             TypeAnalyzer.GetNamespace(derivedType),
             derivedType.Name,
-            derivedType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+            TypeAnalyzer.GetTypeNameForSignature(derivedType),
             flags.IsStruct,
             flags.IsSealed,
             derivedType.IsAbstract,

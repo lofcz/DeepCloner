@@ -947,6 +947,13 @@ internal static class CollectionHelperGenerator
     
     private static string GetArrayCreationExpression(string elementTypeName, string sizeExpression)
     {
+        // Nullable array elements ("T[]?", "T[,]?") cannot use the "new T[n][]" rewrite —
+        // the size belongs after the full element type: new T[]?[n].
+        if (elementTypeName.EndsWith("?", System.StringComparison.Ordinal) && elementTypeName.IndexOf('[') >= 0)
+        {
+            return $"new {elementTypeName}[{sizeExpression}]";
+        }
+
         int bracketIndex = elementTypeName.IndexOf('[');
         
         if (bracketIndex >= 0)

@@ -66,13 +66,13 @@ internal static class NestedTypeCollector
                  if (!TypeAnalyzer.CanGenerateDictionaryHelper(type, collKind, caps))
                      return;
 
-                 string keyTypeName = dictTypes.Value.KeyType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                 string valTypeName = dictTypes.Value.ValueType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                 string keyTypeName = TypeAnalyzer.GetTypeNameForUsage(dictTypes.Value.KeyType);
+                 string valTypeName = TypeAnalyzer.GetTypeNameForUsage(dictTypes.Value.ValueType);
                  string concreteType = TypeAnalyzer.GetConcreteTypeForCollection(type, collKind, $"{keyTypeName}, {valTypeName}");
 
                  MemberModel model = new MemberModel(
                     "NestedHelper", // Dummy name
-                    type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                    TypeAnalyzer.GetTypeNameForSignature(type),
                     false, true, false,
                     MemberTypeKind.Dictionary,
                     null,
@@ -129,7 +129,7 @@ internal static class NestedTypeCollector
                      if (!TypeAnalyzer.CanGenerateCollectionHelper(type, collectionKind, caps, collHasCount))
                          return;
 
-                     concreteType = TypeAnalyzer.GetConcreteTypeForCollection(type, collectionKind, elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat));
+                     concreteType = TypeAnalyzer.GetConcreteTypeForCollection(type, collectionKind, TypeAnalyzer.GetTypeNameForUsage(elemType));
                  }
 
                  // Determine the array rank if it's an array type
@@ -147,10 +147,10 @@ internal static class NestedTypeCollector
 
                  MemberModel model = new MemberModel(
                     "NestedHelper",
-                    type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                    TypeAnalyzer.GetTypeNameForSignature(type),
                     false, true, false,
                     kind,
-                    elemType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat),
+                    TypeAnalyzer.GetTypeNameForUsage(elemType),
                     null, null,
                     elemSafe, elemClon,
                     false, false, false, false,
